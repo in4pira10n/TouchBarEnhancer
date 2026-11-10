@@ -1,0 +1,61 @@
+# SwiftPM caches and generated package state (keep Package.resolved trackable)
+/.build/
+/.swiftpm/
+
+# Packaged applications, captures, and diagnostics
+/dist/
+/build/
+/diagnostics/
+/screenshots/
+*.app/
+*.dSYM/
+*.xcarchive/
+*.ipa
+*.dmg
+*.pkg
+*.o
+*.a
+*.dylib
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+*.profraw
+*.profdata
+*.xcresult/
+
+# Local signing identities, credentials, and provisioning material
+/.signing-identity.local
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.key
+*.pem
+*.cer
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+
+# Xcode build products and per-user state
+/DerivedData/
+**/xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Editor-local state
+/.idea/
+/.vscode/
+
+# macOS metadata and temporary files
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+*~
+*.tmp
+*.log
