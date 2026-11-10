@@ -18,6 +18,10 @@
 
 ## 构建与运行
 
+### 下载
+
+从 [GitHub Releases](https://github.com/in4pira10n/TouchBarEnhancer/releases/latest) 下载 Apple Silicon（`arm64`）ZIP，解压后将 `TouchBarEnhancer.app` 放在固定位置，再授予辅助功能权限。当前安装包要求 macOS 14+，采用本机签名，**尚未公证**，Gatekeeper 可能阻止打开。安装前请阅读发布说明。本次不包含 Intel 安装包。
+
 ### 环境要求
 
 - macOS 14 或更新版本。
@@ -86,7 +90,7 @@ ChatGPT 适配依靠本机菜单和用户配置的快捷键，**不会获取或�
 - TouchBarEnhancer 不需要网络 API、账号登录或 API Key。
 - 跨 App 展示使用 **私有系统模态 Touch Bar API**，封装在 `Sources/TouchBarBridge`。macOS 更新可能影响兼容性；选择子存在不等于硬件展示正常。
 - 从原生栏重新切入自定义栏时，仍可能出现系统滑入动画，此问题尚未解决。
-- 尚未实现登录时启动、公证及二进制发布流程；打包产物为本机签名 App。
+- 尚未实现登录时启动、公证及自动更新；发布产物采用本机签名。
 - 休眠前会收起自定义栏，唤醒后如有需要可点击 **Show Touch Bar**。崩溃、强制退出或其他工具争用后的恢复仍需实机验证。
 
 ## 开发与验证

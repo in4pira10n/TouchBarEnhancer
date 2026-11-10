@@ -18,6 +18,10 @@ A native macOS menu bar app for building per-app Touch Bars with reusable compon
 
 ## Build and run
 
+### Download
+
+Download the Apple Silicon (`arm64`) ZIP from [GitHub Releases](https://github.com/in4pira10n/TouchBarEnhancer/releases/latest), extract it, and move `TouchBarEnhancer.app` to a stable location before granting Accessibility access. The current binary requires macOS 14+ and is locally signed, **not notarized**; Gatekeeper may block it. See the release notes before installing. Intel binaries are not included in this release.
+
 ### Requirements
 
 - macOS 14+.
@@ -86,7 +90,7 @@ The ChatGPT adapter uses locally available menus and user-configured shortcuts. 
 - No network API, account sign-in, or API key is required by TouchBarEnhancer.
 - Cross-app presentation uses **private system-modal Touch Bar APIs**, isolated in `Sources/TouchBarBridge`. Compatibility may change with macOS updates; selector availability alone does not prove working hardware.
 - A system slide-in transition can still occur when returning from a native bar to the custom bar. It remains unresolved.
-- Launch at login, notarization, and a binary release/distribution workflow are not implemented. The packaged app is signed locally.
+- Launch at login, notarization, and automatic updates are not implemented. Published binaries are signed locally.
 - The app hides its bar before sleep. Use **Show Touch Bar** after waking if needed. Recovery after crashes, forced termination, or conflicts with other tools needs hardware testing.
 
 ## Development and verification
