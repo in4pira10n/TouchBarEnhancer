@@ -13,6 +13,7 @@ struct SilentLaunchSmoke {
         let store = SettingsStore(defaults: defaults)
         precondition(store.launchSilently)
         store.paused = true // Test launch, without replacing the current app's bar.
+        store.showControlStripButton = false // Keep the production system-tray item untouched.
         let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let delegate = AppDelegate(settings: store)
         delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
@@ -31,10 +32,23 @@ struct SilentLaunchSmoke {
         precondition(!store.launchSilently && !SettingsStore(defaults: defaults).launchSilently)
         button.performClick(nil)
         precondition(store.launchSilently && SettingsStore(defaults: defaults).launchSilently)
+        let stripPane = window.toolbar!.items.first { $0.itemIdentifier.rawValue == "controlStrip" }!
+        precondition(app.sendAction(stripPane.action!, to: stripPane.target, from: stripPane))
+        let strip = descendants(window.contentView!).compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == "stripMasterEnabled" }!
+        precondition(strip.state == .off)
+        settingsCleanup(delegate)
+        // The delegate is stopped before exercising the setting, avoiding registration.
+        strip.performClick(nil)
+        precondition(store.showControlStripButton && SettingsStore(defaults: defaults).showControlStripButton)
+        strip.performClick(nil)
+        precondition(!store.showControlStripButton)
         precondition(!window.isVisible)
         precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
             "Silent startup and offscreen preferences checks must preserve focus")
         delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
-        print("Silent launch checks passed: default, no startup window, no activation, General checkbox, persisted opt-out and opt-in")
+        print("Silent launch checks passed: default, no startup window, no activation, General and Control Strip controls, persisted opt-out and opt-in")
+    }
+    static func settingsCleanup(_ delegate: AppDelegate) {
+        delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
     }
 }

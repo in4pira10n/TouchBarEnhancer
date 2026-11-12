@@ -24,6 +24,9 @@ final class SettingsStore {
     var rules: [AppRule] = []
     var paused = false
     var launchSilently = true
+    var showControlStripButton = true
+    var controlStripConfiguration = ControlStripConfiguration()
+    var controlStripAutomationRules: [ControlStripAutomationRule] = []
     var autoPolicy: AutoPolicy = .exclusion
     var selectedAppIDs: Set<String> = []
     var layoutApps: [LayoutApp] = []
@@ -45,6 +48,15 @@ final class SettingsStore {
         if let data = defaults.data(forKey: "textComponents"),
            let saved = try? JSONDecoder().decode([String: [TextComponentItem]].self, from: data) { textComponents = saved }
         launchSilently = defaults.object(forKey: "launchSilently") as? Bool ?? true
+        showControlStripButton = defaults.object(forKey: "showControlStripButton") as? Bool ?? true
+        if let data = defaults.data(forKey: "controlStripConfiguration"),
+           let saved = try? JSONDecoder().decode(ControlStripConfiguration.self, from: data) {
+            controlStripConfiguration = saved
+        }
+        if let data = defaults.data(forKey: "controlStripAutomationRules"),
+           let rules = try? JSONDecoder().decode([ControlStripAutomationRule].self, from: data) {
+            controlStripAutomationRules = rules
+        }
         if let data = defaults.data(forKey: "componentDisplayModes"),
            let saved = try? JSONDecoder().decode([String: [String: ComponentDisplayMode]].self, from: data) {
             componentDisplayModes = saved
@@ -124,6 +136,9 @@ final class SettingsStore {
         if let data = try? JSONEncoder().encode(rules) { defaults.set(data, forKey: "appRules") }
         defaults.set(paused, forKey: "paused")
         defaults.set(launchSilently, forKey: "launchSilently")
+        defaults.set(showControlStripButton, forKey: "showControlStripButton")
+        if let data = try? JSONEncoder().encode(controlStripConfiguration) { defaults.set(data, forKey: "controlStripConfiguration") }
+        if let data = try? JSONEncoder().encode(controlStripAutomationRules) { defaults.set(data, forKey: "controlStripAutomationRules") }
         defaults.set(autoPolicy.rawValue, forKey: "autoPolicy")
         defaults.set(selectedAppIDs.sorted(), forKey: "selectedAppIDs")
         defaults.set(chatGPTControlsEnabled, forKey: "chatGPTControlsEnabled")
@@ -154,6 +169,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let generalID = NSToolbarItem.Identifier("general")
     private let applicationsID = NSToolbarItem.Identifier("applications")
     private let appsID = NSToolbarItem.Identifier("apps")
+    private let controlStripID = NSToolbarItem.Identifier("controlStrip")
+    private var controlStripPane: ControlStripSettingsPane!
     private var appsPane: AppsPane!
     private var showingApps = false
     private weak var currentPane: NSView?
@@ -175,6 +192,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         window.center()
         buildContent()
         buildGeneralPane()
+        controlStripPane = ControlStripSettingsPane(store: store)
         appsPane = AppsPane(store: store)
         appsPane.onSelect = { [weak self] app in
             guard let self, self.showingApps else { return }
@@ -315,20 +333,26 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [generalID, applicationsID, appsID]
+        [generalID, controlStripID, applicationsID, appsID]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [generalID, applicationsID, appsID]
+        [generalID, controlStripID, applicationsID, appsID]
     }
 
     func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [generalID, applicationsID, appsID]
+        [generalID, controlStripID, applicationsID, appsID]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: identifier)
+        if identifier == controlStripID {
+            item.label = "Control Strip"
+            item.image = NSImage(systemSymbolName: "rectangle.bottomthird.inset.filled", accessibilityDescription: item.label)
+            item.target = self; item.action = #selector(selectPane(_:))
+            return item
+        }
         let general = identifier == generalID
         item.label = general ? "General" : (identifier == appsID ? "Apps" : "Applications")
         item.image = NSImage(systemSymbolName: general ? "gearshape" : (identifier == appsID ? "rectangle.3.group" : "app.badge"), accessibilityDescription: item.label)
@@ -345,6 +369,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             showPane(appsPane, size: NSSize(width: 760, height: 520))
             appsPane.refresh()
             appsPane.beginPreview()
+        } else if sender.itemIdentifier == controlStripID {
+            onPreviewApp?(nil)
+            showPane(controlStripPane, size: NSSize(width: 820, height: 560))
         } else {
             onPreviewApp?(nil)
             showPane(general ? generalPane : applicationsPane,
@@ -377,6 +404,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         statusLabel.isHidden = status.isEmpty
         generalStatusLabel.stringValue = status
         pauseButton.state = store.paused ? .on : .off
+    }
+
+    func showControlStripError(_ message: String?) { controlStripPane.showActionError(message) }
+    func showControlStripAutomation(_ name: String?, buttonVisible: Bool, playbackUnavailable: Bool) {
+        controlStripPane.showActiveAutomation(name, buttonVisible: buttonVisible, playbackUnavailable: playbackUnavailable)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { store.rules.count }

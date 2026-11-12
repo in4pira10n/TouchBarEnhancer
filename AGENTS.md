@@ -229,6 +229,132 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   excluded/unselected apps. The native-to-modal slide-in is a known unresolved
   system transition; do not claim it fixed based on a selector existing or a
   single still screenshot. Do not change system-wide animation preferences.
+- `ControlStripButton` is a separate, retained system-tray item with its own
+  stable identifier, independent of AppBar/preview layouts. Its action toggles
+  global pause by default and respects app policy on resume. The Control Strip
+  settings tab controls visibility, symbol and tap action;
+  startup remains silent. Private registration/presence functions are isolated
+  and availability-guarded in TouchBarBridge; unregister on disable and clean exit.
+  Do not rewrite system Control Strip preferences or remove Apple's buttons
+  merely to register ours. System positioning must be verified on hardware;
+  successful registration and programmatic `performClick` do not prove visibility
+  or physical touches. Keep ordinary settings/silent-launch fixtures from
+  registering the production identifier; run the signed hardware fixture alone.
+- `ControlStripSettings.swift` owns the persisted configuration, live native
+  editor and action runner. Older preferences default to the original pause
+  action/symbol. Invalid symbol edits must retain the last valid persisted icon.
+  Keep the tray button borderless (no app-style rounded bezel) and let macOS
+  allocate the slot. Fill its square background using the shared standard
+  #363636 and pressed #808080 colors, rather than the system tray's underlying
+  background or a translucent overlay. Its native borderless cell otherwise dims the symbol in a
+  background app and introduces vertical alignment overhang; keep zero alignment
+  insets, native tracking, and full-opacity white symbol drawing. Actual fixture
+  frames on this machine measured 55.5 × 30 points, with no vertical overhang;
+  do not turn that observed width into a fixed constraint. Paste Clipboard sends Command+V without rewriting any
+  pasteboard type; specified text and recorded keys reuse the shared foreground
+  and Accessibility checks. Background Shortcuts uses literal Process arguments,
+  optional private temporary text input and bounded stderr; do not interpolate
+  names/text into a shell command or run an action merely by editing settings.
+  Errors must not activate Settings or open alerts. Use the existing menu tooltip
+  and pane feedback. `check-control-strip-settings.sh` checks dispatch with mock
+  event/URL effects and a private pasteboard; never run the user's shortcuts or
+  paste into their app during a fixture.
+- Control Strip actions Previous Media / Next Media send the system Now Playing
+  transport commands through availability-guarded MediaRemote functions in
+  TouchBarBridge. Inject transport into the action runner; settings tests use a
+  mock and hardware checks only inspect symbol availability. Never skip the
+  user's media during automated verification. These actions need no foreground
+  app, keyboard input, clipboard edits or media polling. Report command rejection
+  without claiming an accepted command proves the player changed track; the
+  active player decides previous/next behavior and availability.
+- Control Strip automations persist as an ordered list separate from Default.
+  Each profile independently configures Tap, Long Press, Option/Command/Control
+  + Tap. Preserve legacy tap fields; store alternate `ControlStripActionBinding`
+  values in `interactionActions`, defaulting to No Action. The same native action
+  editor switches interaction without executing actions or recreating field editors.
+  A binding's validation must not block a different interaction. Keep the symbol
+  and visibility shared by the profile. Physical Touch Bar input uses a retained
+  `ControlStripTouchRecognizer` accepting `.direct` touches; NSButtonCell mouse
+  tracking alone does not cover this path. Claim the direct-touch stream on
+  contact to prevent the native click recognizer from executing another action
+  on release. Keep mouse tracking as a separate fallback. Both paths share one
+  per-profile hold deadline in event-tracking/common modes, default 0.6 seconds;
+  `longPressDuration` persists with each configuration, including Default. Missing
+  or out-of-range saved durations use 0.6; the Long Press editor exposes Hold for
+  (0.1–10 seconds) and Default, saves valid edits live, and retains the field
+  editor. Changing duration cancels a pending press. Use no repeating gesture
+  timer or global input monitor. Track the finger by NSTouch identity and
+  snapshot modifiers on press-down. A plain long hold
+  fires exactly once and suppresses release tap; modified holds remain modifier
+  taps, and Shift/multiple-modifier combinations do nothing. Cancel pending
+  gestures on drag outside, hiding, detachment or configuration changes. Guard
+  stale deliveries after unregister. Test native mouse tracking with local queued
+  events and direct-touch callbacks with immutable event doubles and mock action
+  sinks. Inject an empty hardware-modifier snapshot for synthetic events so the
+  user's typing cannot change the fixture's intended modifiers. These checks
+  and screenshots cannot prove physical finger input.
+  Each stable-ID rule owns its configuration and optional Bluetooth-connected
+  and media-playing requirements; selected conditions combine with AND. First
+  enabled match wins, and no match restores Default. New rules are disabled.
+  Native live editors must distinguish the selected profile from the active
+  profile and preserve field editors; editing never executes an action.
+  The Control Strip pane uses a persistent native configuration list and a
+  separate scrolling detail editor (minimum 820 × 560 points). Default is fixed
+  at the top as fallback, not a higher-priority rule. Show rule order, enabled
+  state and condition summaries in the list. Group the editor into identity /
+  enable, When all match, and Use this button. The independent top header shows
+  the actual active configuration even while another rule is being edited.
+  Add Rule copies Default and starts disabled. Native table drag reordering
+  uses stable IDs and a private pasteboard type, rejects foreign sources and
+  drops above Default, and persists priority without executing actions. Refresh
+  only visible row summaries during typing; never reload the detail field editor.
+  Explicitly constrain separator thickness so a separator cannot consume the
+  body or header area. Verify minimum-size viewports and light/dark rendering.
+  Commit the displayed configuration and tap action together on the main actor.
+  Each configuration (Default and every rule) owns `showsButton`; missing legacy
+  values decode to true. The per-configuration Show button control hides only
+  our extra tray entry, retains its symbol/action, and collapses the action form.
+  The independent header master switch controls both registration and monitoring.
+  Hidden matching rules still win priority; never skip them to show a later rule.
+  Keep monitoring when a profile hides the entry, so a condition change can show
+  it again, including a shown rule over a hidden Default. Hidden configurations
+  cannot dispatch actions or require action validation. Header status reflects
+  actual runtime visibility independently of the selected editor. Verify native
+  unregister/re-register and stale tap suppression without user preference writes.
+  Poll Bluetooth roughly every two seconds only when enabled valid Bluetooth
+  conditions need it and the master is enabled. Media must never be polled:
+  read once on initialization/configuration, then observe system MediaRemote
+  playing/pause and source-change notifications. Apply the notification's bool
+  immediately; query once only for source/unknown events. Bluetooth timer ticks
+  must not query media. Cancel pending reads when a newer event arrives, and
+  reject callbacks from cancelled observation generations. Remove subscriptions
+  on disable/sleep/quit or when no media conditions need them; resample on wake.
+  Media-only rules have no polling timer and must not query Bluetooth.
+  Read paired devices by normalized address, never display name;
+  no discovery, pairing or connection requests. Bluetooth permission is optional
+  and has a purpose string. Preserve a saved unavailable device in the picker.
+  System Now Playing includes supported nonmusic media. Its private MediaRemote
+  query is availability-guarded in TouchBarBridge and injected into the monitor;
+  unknown/paused never matches Playing. Do not launch Music/Spotify or change
+  playback to discover state. Bound pending requests, time out to unknown, and
+  discard stale callbacks after configuration changes/stop. Condition changes
+  must not save preferences, rebuild bars or open Settings.
+  `check-control-strip-settings.sh` tests simulated startup, disconnect, pause,
+  AND, priority, inactive readers, unknown/stale state, per-rule live editing,
+  reordering and persistence. `check-control-strip-media.sh` reads the actual
+  system state without changing playback. Simulated transitions do not prove
+  real AirPods events or physical touches. `check-control-strip-automation-bar.sh`
+  uses the same signed bundle for a nonactivating real tray fixture with mock
+  conditions and mock actions, then restores production silently. It checks
+  frame stability and tap/configuration agreement. Inspect external captures
+  separately: all-black frames do not verify the visible icon transitions.
+- On this Mac running macOS 14.8.9, external captures confirm the tray item
+  appears immediately after the expand chevron, before Apple's compact controls.
+  A reversible experiment replacing only Play/Pause in `MiniCustomized` with our
+  identifier removed Play/Pause but did not move our tray item to that slot.
+  The original array was restored. Do not describe tray registration or editing
+  that array as a working rightmost-button replacement. Restarting ControlStrip
+  during diagnostics also required relaunching the app to register the item again.
 
 ## Adapter behavior, settings and permissions
 

@@ -1,6 +1,261 @@
 import AppKit
 import TouchBarBridge
 
+/// Touch Bar buttons receive direct touches, not NSButtonCell's mouse loop.
+/// Claim the stream on contact so AppKit's built-in click recognizer cannot
+/// turn the release of an already handled hold into a second action.
+@MainActor
+final class ControlStripTouchRecognizer: NSGestureRecognizer {
+    private var touchIdentity: (any NSObjectProtocol)?
+    private var button: ControlStripActionButton? { view as? ControlStripActionButton }
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        allowedTouchTypes = .direct
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        allowedTouchTypes = .direct
+    }
+    override func touchesBegan(with event: NSEvent) {
+        super.touchesBegan(with: event)
+        let touches = event.touches(matching: .began, in: view).filter { $0.type == .direct }
+        guard !touches.isEmpty else { return }
+        guard touchIdentity == nil, touches.count == 1, let touch = touches.first,
+              let button, button.isEnabled, button.bounds.contains(touch.location(in: button)) else {
+            cancelTouch()
+            return
+        }
+        touchIdentity = touch.identity
+        state = .began
+        button.beginInteraction(modifiers: event.modifierFlags.union(button.currentModifiers()))
+        button.highlight(true)
+    }
+    override func touchesMoved(with event: NSEvent) {
+        super.touchesMoved(with: event)
+        guard let touch = trackedTouch(in: event, phase: .moved), let button else { return }
+        if !button.bounds.contains(touch.location(in: button)) { cancelTouch() }
+    }
+    override func touchesEnded(with event: NSEvent) {
+        super.touchesEnded(with: event)
+        guard let touch = trackedTouch(in: event, phase: .ended), let button else { return }
+        if !button.bounds.contains(touch.location(in: button)) { button.cancelInteraction() }
+        // sendAction suppresses taps after a long press or cancellation.
+        _ = button.sendAction(button.action, to: button.target)
+        button.highlight(false)
+        state = .ended
+    }
+    override func touchesCancelled(with event: NSEvent) {
+        super.touchesCancelled(with: event)
+        if trackedTouch(in: event, phase: .cancelled) != nil { cancelTouch() }
+    }
+    private func trackedTouch(in event: NSEvent, phase: NSTouch.Phase) -> NSTouch? {
+        guard let touchIdentity else { return nil }
+        return event.touches(matching: phase, in: view).first {
+            $0.type == .direct && touchIdentity.isEqual($0.identity)
+        }
+    }
+    private func cancelTouch() {
+        button?.cancelInteraction()
+        button?.highlight(false)
+        state = state == .possible ? .failed : .cancelled
+    }
+    override func reset() {
+        if touchIdentity != nil {
+            button?.highlight(false)
+            button?.endInteraction()
+        }
+        touchIdentity = nil
+        super.reset()
+    }
+    override func canBePrevented(by preventingGestureRecognizer: NSGestureRecognizer) -> Bool { false }
+}
+
+/// Preserve NSButton's native tracking loop and pressed feedback. The only timer
+/// is a one-shot hold deadline, active while an unmodified press is held.
+@MainActor
+final class ControlStripActionCell: NSButtonCell {
+    override func highlight(_ flag: Bool, withFrame cellFrame: NSRect, in controlView: NSView) {
+        isHighlighted = flag
+        controlView.needsDisplay = true; controlView.displayIfNeeded()
+    }
+    override func trackMouse(with event: NSEvent, in cellFrame: NSRect, of controlView: NSView, untilMouseUp flag: Bool) -> Bool {
+        guard let button = controlView as? ControlStripActionButton else {
+            return super.trackMouse(with: event, in: cellFrame, of: controlView, untilMouseUp: flag)
+        }
+        button.beginInteraction(modifiers: event.modifierFlags.union(button.currentModifiers()))
+        defer { button.endInteraction() }
+        return super.trackMouse(with: event, in: cellFrame, of: controlView, untilMouseUp: flag)
+    }
+    override func startTracking(at startPoint: NSPoint, in controlView: NSView) -> Bool { true }
+    override func continueTracking(last lastPoint: NSPoint, current currentPoint: NSPoint, in controlView: NSView) -> Bool {
+        if !controlView.bounds.contains(currentPoint) { (controlView as? ControlStripActionButton)?.cancelInteraction() }
+        return true
+    }
+}
+
+/// Use shared button colors with square corners inside the system's tray slot.
+@MainActor
+final class ControlStripActionButton: NSButton {
+    // Direct Touch Bar events may omit hardware keyboard modifiers. Fixtures
+    // inject an empty snapshot so the user's typing cannot alter queued input.
+    var currentModifiers: () -> NSEvent.ModifierFlags = { NSEvent.modifierFlags }
+    var longPressDuration = ControlStripConfiguration.defaultLongPressDuration {
+        didSet {
+            if !ControlStripConfiguration.isValidLongPressDuration(longPressDuration) { longPressDuration = oldValue }
+            if longPressDuration != oldValue { cancelInteraction() }
+        }
+    }
+    private var holdTimer: Timer?
+    private var trackingInteraction = false
+    private var clickInteraction: ControlStripInteraction?
+    private var consumedInteraction = false
+    private(set) var deliveredInteraction: ControlStripInteraction?
+
+    override class var cellClass: AnyClass? {
+        get { ControlStripActionCell.self }
+        set { super.cellClass = newValue }
+    }
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installDirectTouchTracking()
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installDirectTouchTracking()
+    }
+    private func installDirectTouchTracking() {
+        allowedTouchTypes = .direct
+        addGestureRecognizer(ControlStripTouchRecognizer(target: nil, action: nil))
+    }
+    func beginInteraction(modifiers: NSEvent.ModifierFlags) {
+        endInteraction()
+        trackingInteraction = true; consumedInteraction = false
+        clickInteraction = ControlStripInteraction.click(modifiers: modifiers)
+        guard isEnabled, clickInteraction == .tap else { return }
+        let timer = Timer(timeInterval: longPressDuration, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.recognizeLongPress() }
+        }
+        holdTimer = timer
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        RunLoop.main.add(timer, forMode: .common)
+    }
+    func recognizeLongPress() {
+        guard isEnabled, trackingInteraction, !consumedInteraction, clickInteraction == .tap else { return }
+        consumedInteraction = true
+        holdTimer?.invalidate(); holdTimer = nil
+        _ = deliver(.longPress, action: action, target: target)
+    }
+    func cancelInteraction() {
+        holdTimer?.invalidate(); holdTimer = nil
+        // Retain the cancellation until the native tracking loop finishes, so a
+        // late mouse-up after hide/configuration changes cannot become a tap.
+        if trackingInteraction { consumedInteraction = true }
+    }
+    func endInteraction() {
+        holdTimer?.invalidate(); holdTimer = nil
+        trackingInteraction = false; consumedInteraction = false; clickInteraction = nil
+    }
+    override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
+        guard isEnabled else { return false }
+        if trackingInteraction {
+            guard !consumedInteraction, let clickInteraction else { return false }
+            consumedInteraction = true
+            holdTimer?.invalidate(); holdTimer = nil
+            return deliver(clickInteraction, action: action, target: target)
+        }
+        return deliver(.tap, action: action, target: target)
+    }
+    private func deliver(_ interaction: ControlStripInteraction, action: Selector?, target: Any?) -> Bool {
+        deliveredInteraction = interaction
+        defer { deliveredInteraction = nil }
+        return super.sendAction(action, to: target)
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { cancelInteraction() }
+    }
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        needsDisplay = true
+        displayIfNeeded()
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let background = isHighlighted ? ChatSideButton.pressedBackground : ChatSideButton.normalBackground
+        background.setFill()
+        NSBezierPath(rect: bounds).fill()
+        guard let image else { return }
+        let size = image.size
+        let scale = min(1, min(bounds.width / max(size.width, 1), bounds.height / max(size.height, 1)))
+        let rect = NSRect(x: (bounds.width - size.width * scale) / 2,
+            y: (bounds.height - size.height * scale) / 2, width: size.width * scale, height: size.height * scale)
+        // Native NSButtonCell dims a borderless button in a background app.
+        // Keep native tracking/action, but draw the symbol at full opacity.
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+    }
+}
+
+/// A separate system-tray item, retained independently of the per-app bar.
+@MainActor
+final class ControlStripButton: NSObject {
+    static let identifier = NSTouchBarItem.Identifier("local.starfruit.TouchBarEnhancer.controlstrip.toggle")
+    let item = NSCustomTouchBarItem(identifier: identifier)
+    let button: ControlStripActionButton
+    private(set) var isRegistered = false
+    var onPress: (() -> Void)?
+    var onInteraction: ((ControlStripInteraction) -> Void)?
+    private var configuration: ControlStripConfiguration?
+
+    override init() {
+        button = ControlStripActionButton(image: NSImage(systemSymbolName: ControlStripConfiguration.defaultSymbol, accessibilityDescription: "TouchBarEnhancer")!,
+            target: nil, action: nil)
+        super.init()
+        button.imagePosition = .imageOnly
+        button.isBordered = false
+        button.imageScaling = .scaleProportionallyDown
+        button.contentTintColor = .white
+        button.target = self; button.action = #selector(pressed)
+        item.view = button
+        item.customizationLabel = "TouchBarEnhancer"
+        update(enabled: false, paused: false)
+    }
+    func update(enabled: Bool, paused: Bool, configuration: ControlStripConfiguration = .init()) {
+        if self.configuration != configuration { button.cancelInteraction() }
+        self.configuration = configuration
+        button.longPressDuration = ControlStripConfiguration.isValidLongPressDuration(configuration.longPressDuration)
+            ? configuration.longPressDuration : ControlStripConfiguration.defaultLongPressDuration
+        let symbol = paused && configuration.action == .toggleEnhancement && configuration.symbol == ControlStripConfiguration.defaultSymbol
+            ? "rectangle.slash" : configuration.symbol
+        button.image = (NSImage(systemSymbolName: symbol, accessibilityDescription: "TouchBarEnhancer")
+            ?? NSImage(systemSymbolName: ControlStripConfiguration.defaultSymbol, accessibilityDescription: "TouchBarEnhancer"))?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
+                .applying(.init(paletteColors: [.white])))
+        let action = configuration.action == .toggleEnhancement
+            ? (paused ? "Resume TouchBarEnhancer" : "Pause TouchBarEnhancer") : configuration.action.title
+        button.toolTip = ControlStripInteraction.allCases.compactMap { gesture -> String? in
+            let binding = configuration.binding(for: gesture)
+            guard binding.action != .none else { return nil }
+            return "\(gesture.title): \(gesture == .tap ? action : binding.action.title)"
+        }.joined(separator: "\n")
+        button.setAccessibilityLabel(action)
+        let visible = enabled && configuration.showsButton
+        button.isEnabled = visible
+        if visible && !isRegistered { isRegistered = TBControlStripRegister(item) }
+        else if !visible { remove() }
+    }
+    func remove() {
+        button.cancelInteraction()
+        guard isRegistered else { return }
+        TBControlStripUnregister(item); isRegistered = false
+    }
+    @objc private func pressed() {
+        guard isRegistered else { return }
+        if let onInteraction { onInteraction(button.deliveredInteraction ?? .tap) }
+        else { onPress?() }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -9,6 +264,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var providers: [String: AppBar] = [:]
     private var presented: AppBar?
     private let barHost = AppBarHost()
+    private let controlStrip = ControlStripButton()
+    private let controlStripActions = ControlStripActionRunner()
+    private let controlStripAutomation = ControlStripAutomationMonitor(readMedia: { completion in
+        TBReadMediaPlaying { value in
+            MainActor.assumeIsolated { completion(value?.boolValue) }
+        }
+    }, observeMedia: { changed in
+        guard let observation = TBObserveMediaPlaying({ value in
+            MainActor.assumeIsolated { changed(value?.boolValue) }
+        }) else { return nil }
+        return { TBStopObservingMediaPlaying(observation) }
+    })
+    private var effectiveControlStripConfiguration = ControlStripConfiguration()
     private var previewApp: LayoutApp?
     private var hiddenForCurrentApp = false
     private var clockTimer: Timer?
@@ -47,15 +315,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         addMenuItem("Quit TouchBarEnhancer", action: #selector(quit), to: menu)
         statusItem.menu = menu
+        controlStripActions.skipMedia = { TBSkipMedia($0) }
+        controlStrip.onInteraction = { [weak self] interaction in
+            guard let self else { return }
+            self.statusItem.button?.toolTip = "TouchBarEnhancer"
+            self.settingsWindow?.showControlStripError(nil)
+            self.controlStripActions.perform(self.effectiveControlStripConfiguration, interaction: interaction) {
+                self.settings.paused.toggle()
+                self.settings.save()
+            }
+        }
+        controlStripActions.onError = { [weak self] message in
+            self?.statusItem.button?.toolTip = message
+            self?.settingsWindow?.showControlStripError(message)
+            NSSound.beep()
+        }
+        controlStripAutomation.onChange = { [weak self] in self?.updateControlStrip() }
+        configureControlStripAutomation()
 
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(frontAppChanged),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep),
             name: NSWorkspace.willSleepNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake),
+            name: NSWorkspace.didWakeNotification, object: nil)
         settings.onChange = { [weak self] in
-            self?.hiddenForCurrentApp = false
-            self?.settingsWindow?.refreshAppsIfNeeded()
-            self?.applyRules()
+            guard let self else { return }
+            self.configureControlStripAutomation()
+            self.hiddenForCurrentApp = false
+            self.settingsWindow?.refreshAppsIfNeeded()
+            self.applyRules()
         }
         clockTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -74,6 +363,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         menu.addItem(item)
+    }
+
+    private func configureControlStripAutomation() {
+        controlStripAutomation.configure(enabled: settings.showControlStripButton, rules: settings.controlStripAutomationRules)
+        updateControlStrip()
+    }
+    private func updateControlStrip() {
+        // Commit the displayed symbol and the action for its next tap together.
+        effectiveControlStripConfiguration = controlStripAutomation.activeRule?.configuration ?? settings.controlStripConfiguration
+        controlStrip.update(enabled: settings.showControlStripButton, paused: settings.paused,
+                            configuration: effectiveControlStripConfiguration)
+        settingsWindow?.showControlStripAutomation(controlStripAutomation.activeRule?.name,
+            buttonVisible: settings.showControlStripButton && effectiveControlStripConfiguration.showsButton,
+            playbackUnavailable: controlStripAutomation.isMonitoring && controlStripAutomation.needsMedia && controlStripAutomation.mediaIsPlaying == nil)
     }
 
     private func provider(for app: LayoutApp) -> AppBar {
@@ -112,6 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.onCustomizeApp = { [weak self] app in self?.customize(app) }
             settingsWindow = controller
         }
+        updateControlStrip()
         settingsWindow?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.resumePreviewIfNeeded()
@@ -178,23 +482,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyRules()
     }
     @objc private func willSleep(_ notification: Notification) {
+        controlStripAutomation.stop()
         previewApp = nil
         settingsWindow?.window?.touchBar = nil
         settingsWindow?.window?.contentView?.touchBar = nil
         hiddenForCurrentApp = true
         dismissBar()
     }
+    @objc private func didWake(_ notification: Notification) {
+        configureControlStripAutomation()
+    }
     @objc private func showDiagnostics() {
         let alert = NSAlert()
         alert.messageText = "TouchBarEnhancer"
-        alert.informativeText = "Private presentation API: \(TBIsAvailable() ? "available" : "unavailable")\nActive layout: \(previewApp?.name ?? presented?.app.name ?? "Native")\n\nApps previews use the window’s native Touch Bar. Other apps use system-modal presentation. Layouts are saved separately per app by AppKit."
+        alert.informativeText = "Private presentation API: \(TBIsAvailable() ? "available" : "unavailable")\nControl Strip API: \(TBControlStripIsAvailable() ? "available" : "unavailable")\nControl Strip item: \(controlStrip.isRegistered ? "registered" : "not registered")\nActive layout: \(previewApp?.name ?? presented?.app.name ?? "Native")\n\nApps previews use the window’s native Touch Bar. Other apps use system-modal presentation. Layouts are saved separately per app by AppKit."
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
         clockTimer?.invalidate()
+        settings.onChange = nil
+        controlStripAutomation.onChange = nil
+        controlStripAutomation.stop()
         dismissBar()
+        controlStrip.remove()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 }

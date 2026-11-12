@@ -9,6 +9,11 @@ struct SettingsSmoke {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = SettingsStore(defaults: defaults)
         precondition(store.launchSilently, "New and existing installations must launch silently by default")
+        precondition(store.showControlStripButton)
+        store.showControlStripButton = false; store.save()
+        precondition(!SettingsStore(defaults: defaults).showControlStripButton)
+        store.showControlStripButton = true; store.save()
+        precondition(SettingsStore(defaults: defaults).showControlStripButton)
         store.launchSilently = false
         store.save()
         precondition(!SettingsStore(defaults: defaults).launchSilently, "Explicit opt-out must persist")

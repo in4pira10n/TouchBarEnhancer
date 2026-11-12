@@ -4,7 +4,7 @@ English · [简体中文](README.zh-CN.md)
 
 A native macOS menu bar app for building per-app Touch Bars with reusable components. Built with Swift and AppKit, without BetterTouchTool or a full Xcode installation.
 
-**Status:** early development, currently version 0.1.0. Requires macOS 14 or later and a MacBook Pro with a Touch Bar for hardware use. The app interface is in English.
+**Status:** early development, currently version 0.2.0. Requires macOS 14 or later and a MacBook Pro with a Touch Bar for hardware use. The app interface is in English.
 
 ## Features
 
@@ -15,6 +15,7 @@ A native macOS menu bar app for building per-app Touch Bars with reusable compon
 - Live editing, draggable list ordering, and separate app configurations. No Save buttons.
 - Selection and exclusion policies, explicit per-app overrides, global pause, and silent launch enabled by default.
 - Preserves the system Control Strip and replaces the modal bar's leftmost close slot with the first component.
+- Configurable Control Strip button with an SF Symbol, tap/hold/modifier actions, and Bluetooth/system playback automation. Uses private registration APIs; placement is managed by macOS.
 
 ## Build and run
 
@@ -68,6 +69,22 @@ The build script fails if the identity is missing or unavailable; it never falls
 
 Pause other Touch Bar replacement tools while using this app to avoid competing presentations.
 
+**Settings → Control Strip** configures the system-tray entry (on by default). Set its SF Symbol and tap action: pause/resume enhancement (the default), paste the existing clipboard, paste specified text, copy text, send a recorded keyboard shortcut, run an Apple Shortcut, or open a URL. Changes save and apply immediately; Default resets just the symbol. Shortcut input can be None, Clipboard Text, or Specified Text. Shortcuts runs in the background through `/usr/bin/shortcuts` with literal arguments, without a shell. Paste Clipboard preserves the original pasteboard, including images/files; paste and keyboard actions target the foreground app and require Accessibility. Specified pasted text remains on the clipboard. Failures appear in the menu bar icon's tooltip and in this settings pane when open.
+
+**Previous Media** and **Next Media** send system Now Playing transport commands without switching apps, sending keyboard input or changing the clipboard. They are available for every interaction. The active player determines whether it can skip and how Previous behaves; system acceptance alone does not confirm a track change.
+
+The **Configurations** list keeps Default and automation rules visible. Select Default to edit the fallback button, or use **Add Rule** to create a disabled rule based on Default. The right-hand editor separates the rule's name and enable switch, **When all match** conditions, and **Use this button** symbol and tap action. Choose **Bluetooth device is connected**, **Music / media is playing**, or both. For Bluetooth, use Refresh to select an already paired device, then enable the rule. The first matching enabled rule wins; drag rules or use ↑/↓ to change priority. Default stays fixed and is used when no rule matches. The header shows the configuration currently in use, independently of the selected editor. Conditions switch configuration only: actions still require a tap. Changes save immediately.
+
+Each configuration, including Default, has its own **Show button** switch. Turning it off hides our extra Control Strip entry while that configuration is active, preserves its symbol/action, and keeps conditions monitored. A hidden matching rule still wins priority. For example, hide Default and show a Playing rule to display the button only during playback. The header's **Enable Control Strip button** is the master switch for both the entry and automation. Older configurations remain shown by default.
+
+Media uses system Now Playing notifications: one initial state read, then playback/pause and playback-source changes update the rule without periodic media queries. This covers supported music, videos and browser media, not exclusively music, through availability-guarded private MediaRemote APIs. Paused or unavailable playback does not match. Bluetooth conditions alone check paired-device connection status about every two seconds while needed, without scanning or connecting; macOS may request Bluetooth permission. Monitoring continues while a configuration hides the button. No media app is launched and playback is never changed. With no enabled valid rules, monitoring stops; media-only rules do not access Bluetooth or start a polling timer.
+
+Each configuration also has independent **Tap**, **Long Press**, **Option + Tap**, **Command + Tap**, and **Control + Tap** actions. Select an **Interaction**, then edit its action using the same fields. Existing Tap settings are preserved; additional interactions default to **No Action**. Under Long Press, **Hold for** sets the duration independently for each configuration (0.1–10 seconds, default 0.6); **Default** restores 0.6 seconds. Long Press fires once and suppresses the release tap. Modifier taps use the modifier held at press-down; Shift and multiple-modifier combinations have no assigned action. Modified holds remain modifier taps on release. Moving outside the button, hiding it, or changing configuration cancels a pending press. The hold deadline is a one-shot timer only while pressing; media monitoring remains event-driven.
+
+The button has no app-style rounded bezel and uses the system's tray allocation. This registers an additional item without changing Apple's saved button order or removing Play/Pause. Exact placement and availability depend on macOS, and the button is removed when disabled or on normal quit. Pause/resume still respects your app rules.
+
+On the tested Mac running macOS 14.8.9, this entry appears beside the expand chevron, before the system controls. Substituting its identifier for Play/Pause in the system's compact layout did not place it in the rightmost slot; that experiment was reverted. This feature adds an entry rather than replacing the system Play/Pause button. If ControlStrip is restarted separately, relaunch TouchBarEnhancer to restore its entry.
+
 ## Components
 
 | Component | Behavior |
@@ -117,6 +134,7 @@ For hardware layout verification, after packaging the signed app:
 bash scripts/check-component-bar.sh
 bash scripts/check-component-widths-bar.sh
 bash scripts/check-text-region-width-bar.sh
+bash scripts/check-control-strip.sh
 bash scripts/capture-touchbar.sh
 ```
 
