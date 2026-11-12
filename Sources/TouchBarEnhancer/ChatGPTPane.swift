@@ -14,9 +14,64 @@ final class ComponentInlinePopup: NSPopUpButton {
     @objc private func changed() { onChange?(indexOfSelectedItem) }
 }
 
+/// Shared native cell editor; saves valid values without replacing its field editor.
+@MainActor
+final class ComponentItemWidthControl: NSStackView {
+    private var value: ComponentItemWidth
+    private let mode: ComponentInlinePopup
+    private let number: ComponentInlineTextField
+    private let unit = NSTextField(labelWithString: "")
+    var onChange: ((ComponentItemWidth) -> Void)?
+
+    init(value: ComponentItemWidth?) {
+        self.value = value ?? .init()
+        mode = ComponentInlinePopup(titles: ComponentItemWidth.Mode.allCases.map(\.rawValue),
+            selected: ComponentItemWidth.Mode.allCases.firstIndex(of: self.value.mode)!)
+        number = ComponentInlineTextField(value: "", placeholder: "12")
+        super.init(frame: .zero)
+        orientation = .horizontal; alignment = .centerY; spacing = 6
+        mode.setAccessibilityIdentifier("itemWidthMode")
+        mode.setAccessibilityLabel("Button width mode")
+        number.setAccessibilityIdentifier("itemWidthValue")
+        number.controlSize = .small
+        number.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        unit.font = .systemFont(ofSize: NSFont.smallSystemFontSize); unit.textColor = .secondaryLabelColor
+        addArrangedSubview(mode); addArrangedSubview(number); addArrangedSubview(unit)
+        mode.onChange = { [weak self] index in
+            guard let self else { return }
+            self.value.mode = ComponentItemWidth.Mode.allCases[index]
+            self.refresh(); self.onChange?(self.value)
+        }
+        number.onEdit = { [weak self] text in self?.editNumber(text) }
+        refresh()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    private func refresh() {
+        number.isHidden = value.mode == .hug; unit.isHidden = value.mode == .hug
+        let scalar = value.mode == .fixed ? value.fixed : value.relative
+        number.stringValue = scalar.formatted(.number.grouping(.never).locale(Locale(identifier: "en_US_POSIX")))
+        number.textColor = .labelColor
+        number.setAccessibilityLabel(value.mode == .fixed ? "Width in points" : "Relative width weight")
+        number.toolTip = value.mode == .fixed ? "Width in points." : "Proportional weight; 6, 6, 12 gives 1:1:2."
+        unit.stringValue = value.mode == .fixed ? "pt" : ""
+    }
+    private func editNumber(_ text: String) {
+        guard let number = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)), ComponentItemWidth.valid(number) else {
+            self.number.textColor = .systemRed
+            self.number.toolTip = "Enter a positive number up to 1,000,000."
+            return
+        }
+        guard value.mode != .hug else { return }
+        if value.mode == .fixed { value.fixed = number } else { value.relative = number }
+        self.number.textColor = .labelColor
+        onChange?(value)
+    }
+}
+
 /// Shared native options for every component with a list of entries.
 @MainActor
 final class ComponentPresentationControls: NSGridView {
+    var onLayoutChange: ((ComponentLayout) -> Void)?
     static var labelWidth: CGFloat { NSTextField(labelWithString: "Text alignment:").fittingSize.width }
     private let store: SettingsStore
     private let appBundleID: String
@@ -65,7 +120,10 @@ final class ComponentPresentationControls: NSGridView {
         guard let layout = layoutPopup.titleOfSelectedItem.flatMap(ComponentLayout.init(rawValue:)),
               let alignment = alignmentPopup.titleOfSelectedItem.flatMap(ScrollingComponentAlignment.init(rawValue:)) else { return }
         alignmentRow?.isHidden = layout == .fill
-        store.setPresentation(.init(layout: layout, alignment: alignment), for: component, app: appBundleID)
+        var presentation = store.presentation(for: component, app: appBundleID)
+        presentation.layout = layout; presentation.alignment = alignment
+        store.setPresentation(presentation, for: component, app: appBundleID)
+        onLayoutChange?(layout)
     }
 }
 
@@ -196,6 +254,11 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         }
         let displayColumn = NSTableColumn(identifier: .init("display")); displayColumn.title = "Display"
         displayColumn.width = 170; displayColumn.minWidth = 160; table.addTableColumn(displayColumn)
+        let widthColumn = NSTableColumn(identifier: .init("width")); widthColumn.title = "Width"
+        widthColumn.width = 195; widthColumn.minWidth = 185
+        widthColumn.isHidden = store.presentation(for: kind.componentKey, app: appBundleID).layout != .fill
+        table.addTableColumn(widthColumn)
+        options.onLayoutChange = { [weak widthColumn] layout in widthColumn?.isHidden = layout != .fill }
         table.rowHeight = 32; table.style = .inset
         table.allowsEmptySelection = true
         table.dataSource = self; table.delegate = self
@@ -297,6 +360,11 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let item = displayItem(at: row)
         let cell = NSView()
+        if tableColumn?.identifier.rawValue == "width" {
+            let control = ComponentItemWidthControl(value: item.fillWidth)
+            control.onChange = { [weak self] width in self?.editInline(item.id, .width(width)) }
+            return control
+        }
         if tableColumn?.identifier.rawValue == "display" {
             let popup = ComponentInlinePopup(titles: ["Follow Component", "Always Icon Only", "Always Icon + Text"],
                 selected: item.displayModeOverride == .iconOnly ? 1 : (item.displayModeOverride == .iconAndText ? 2 : 0))
@@ -338,7 +406,7 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         return cell
     }
 
-    private enum InlineEdit { case title(String), display(ComponentDisplayMode?), slot(Int), key(KeyboardShortcut?) }
+    private enum InlineEdit { case title(String), display(ComponentDisplayMode?), slot(Int), key(KeyboardShortcut?), width(ComponentItemWidth) }
     private func editInline(_ id: UUID, _ edit: InlineEdit) {
         guard let row = (0..<count).first(where: { displayItem(at: $0).id == id }) else { return }
         var item = displayItem(at: row)
@@ -349,14 +417,17 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         case .display(let mode): item.displayModeOverride = mode
         case .slot(let slot): item.slot = slot
         case .key(let shortcut): keyboardConfiguration.buttons[row].shortcut = shortcut
+        case .width(let width): item.fillWidth = width
         }
         switch kind {
         case .chats: store.chatShortcuts[row] = item
         case .phrases:
             phrases[row].name = item.name; phrases[row].displayModeOverride = item.displayModeOverride
+            phrases[row].fillWidth = item.fillWidth
         case .keyboard:
             keyboardConfiguration.buttons[row].title = item.name
             keyboardConfiguration.buttons[row].displayModeOverride = item.displayModeOverride
+            keyboardConfiguration.buttons[row].fillWidth = item.fillWidth
         }
         showError(""); store.save()
     }

@@ -36,15 +36,18 @@ struct ListReorderingSmoke {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = SettingsStore(defaults: defaults)
-        store.chatShortcuts = [ChatShortcut(name: "First", color: "blue", slot: 2, displayModeOverride: .iconOnly),
-            ChatShortcut(name: "第二个", color: "teal", slot: 7), ChatShortcut(name: "Third", color: "orange", slot: 9)]
+        let widths: [ComponentItemWidth] = [.init(relative: 6), .init(mode: .fixed, fixed: 96), .init(mode: .hug)]
+        store.chatShortcuts = [ChatShortcut(name: "First", color: "blue", slot: 2, displayModeOverride: .iconOnly, fillWidth: widths[0]),
+            ChatShortcut(name: "第二个", color: "teal", slot: 7, fillWidth: widths[1]),
+            ChatShortcut(name: "Third", color: "orange", slot: 9, fillWidth: widths[2])]
         let keyboardApp = LayoutApp.builtIn[0].bundleID
         store.quickPhrasesByApp[keyboardApp] = (1...3).map {
-            QuickPhrase(name: "Phrase \($0)", text: "Content \($0)\n第二行", displayModeOverride: $0 == 1 ? .iconAndText : nil)
+            QuickPhrase(name: "Phrase \($0)", text: "Content \($0)\n第二行", displayModeOverride: $0 == 1 ? .iconAndText : nil,
+                fillWidth: widths[$0 - 1])
         }
         store.keyboardButtons[keyboardApp] = KeyboardButtonsConfiguration(buttons: (1...3).map {
             KeyboardButton(title: "Button \($0)", shortcut: .init(keyCode: UInt16($0), modifiers: NSEvent.ModifierFlags.command.rawValue,
-                keyLabel: "\($0)"), description: "Action \($0)", displayModeOverride: $0 == 1 ? .iconOnly : nil)
+                keyLabel: "\($0)"), description: "Action \($0)", displayModeOverride: $0 == 1 ? .iconOnly : nil, fillWidth: widths[$0 - 1])
         })
         let provider = AppBar(app: LayoutApp.builtIn[0], shortcuts: store.chatShortcuts,
             phrases: store.quickPhrasesByApp[keyboardApp]!, keyboardButtons: store.keyboardButtons[keyboardApp]!, persistsLayout: false)

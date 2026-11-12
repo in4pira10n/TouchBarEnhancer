@@ -9,6 +9,38 @@ enum ComponentLayout: String, Codable, CaseIterable { case scrolling = "Scrollin
 struct ComponentPresentation: Codable, Equatable {
     var layout: ComponentLayout = .scrolling
     var alignment: ScrollingComponentAlignment = .left
+    var textWidth: TextComponentWidth?
+}
+
+/// Per-entry sizing in Fill; values remain saved while the component scrolls.
+struct ComponentItemWidth: Codable, Equatable {
+    enum Mode: String, Codable, CaseIterable { case relative = "Relative", fixed = "Fixed", hug = "Hug" }
+    var mode: Mode = .relative
+    var relative: Double = 12
+    var fixed: Double = 75
+
+    static func valid(_ value: Double) -> Bool { value.isFinite && value > 0 && value <= 1_000_000 }
+
+    /// Fixed/Hug retain their widths on overflow; the native scroller handles it.
+    static func allocate(_ policies: [Self], naturalWidths: [CGFloat], available: CGFloat) -> [CGFloat] {
+        precondition(policies.count == naturalWidths.count)
+        var widths = zip(policies, naturalWidths).map { policy, natural -> CGFloat in
+            switch policy.mode {
+            case .relative: return 0
+            case .fixed: return CGFloat(valid(policy.fixed) ? policy.fixed : 75)
+            case .hug: return max(1, natural)
+            }
+        }
+        let indices = policies.indices.filter { policies[$0].mode == .relative }
+        let weights = indices.map { valid(policies[$0].relative) ? policies[$0].relative : 12 }
+        let total = weights.reduce(0, +)
+        let gaps = CGFloat(max(0, policies.count - 1)) * ScrollingComponentStyle.itemSpacing
+        let remaining = max(0, available - gaps - widths.reduce(0, +))
+        for (index, weight) in zip(indices, weights) {
+            widths[index] = max(1, remaining * CGFloat(weight / total))
+        }
+        return widths
+    }
 }
 
 /// A presentation preference for an entire component, never an individual item.
@@ -53,7 +85,7 @@ final class TouchBarComponentView: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(content)
         leadingConstraint = content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingSpacing)
-        setContentHuggingPriority(.init(1), for: .horizontal)
+        setContentHuggingPriority((content as? ScrollingComponentRegion)?.requestedWidth == nil ? .init(1) : .required, for: .horizontal)
         setContentCompressionResistancePriority(.init(1), for: .horizontal)
         NSLayoutConstraint.activate([
             leadingConstraint,
@@ -84,6 +116,7 @@ struct ScrollingComponentItem: Equatable {
     var toolTip: String
     var displayModeOverride: ComponentDisplayMode?
     var textStyle: TextComponentStyle?
+    var fillWidth: ComponentItemWidth?
 
     enum Background: Equatable {
         case standard
@@ -94,6 +127,19 @@ struct ScrollingComponentItem: Equatable {
 
 @MainActor
 final class ScrollingComponentRegion: NSView {
+    var requestedWidth: CGFloat? {
+        didSet {
+            guard oldValue != requestedWidth else { return }
+            minimumWidthConstraint?.constant = requestedWidth == nil ? ScrollingComponentStyle.minimumWidth : 1
+            setContentHuggingPriority(requestedWidth == nil ? .init(1) : .required, for: .horizontal)
+            (superview as? TouchBarComponentView)?.setContentHuggingPriority(requestedWidth == nil ? .init(1) : .required, for: .horizontal)
+            invalidateIntrinsicContentSize()
+            (superview as? TouchBarComponentView)?.invalidateIntrinsicContentSize()
+            onWidthRequestChange?()
+        }
+    }
+    var minimumWidthConstraint: NSLayoutConstraint?
+    var onWidthRequestChange: (() -> Void)?
     var preferredWidth = ScrollingComponentStyle.preferredWidth {
         didSet {
             if oldValue != preferredWidth {
@@ -103,12 +149,15 @@ final class ScrollingComponentRegion: NSView {
         }
     }
     var onWindowChange: (() -> Void)?
+    var onMeasurementContextChange: (() -> Void)?
     var onLayout: ((NSRect) -> Void)?
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); onWindowChange?() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow(); onMeasurementContextChange?(); onWindowChange?()
+    }
     override func layout() { super.layout(); onLayout?(bounds) }
     override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); needsLayout = true }
     override var intrinsicContentSize: NSSize {
-        NSSize(width: preferredWidth, height: ScrollingComponentStyle.height)
+        NSSize(width: requestedWidth ?? preferredWidth, height: ScrollingComponentStyle.height)
     }
 }
 
@@ -272,6 +321,11 @@ final class ShortcutScroller: NSObject, NSScrubberDataSource, NSScrubberFlowLayo
     let scrollRegion = ScrollingComponentRegion()
     private(set) var items: [ScrollingComponentItem] = []
     var onSelect: ((Int) -> Void)?
+    var onNaturalWidthChange: (() -> Void)?
+    var naturalContentWidth: CGFloat {
+        items.reduce(CGFloat.zero) { $0 + naturalWidth(for: $1) }
+            + CGFloat(max(0, items.count - 1)) * ScrollingComponentStyle.itemSpacing
+    }
     var displayMode: ComponentDisplayMode = .iconAndText {
         didSet { if oldValue != displayMode { reloadPresentation() } }
     }
@@ -279,12 +333,14 @@ final class ShortcutScroller: NSObject, NSScrubberDataSource, NSScrubberFlowLayo
     var fillsAvailableWidth = false {
         didSet {
             guard oldValue != fillsAvailableWidth else { return }
+            fillWidths = nil
             scrubber.scrubberLayout.invalidateLayout()
             updateAlignment()
         }
     }
     private let alignsContent: Bool
     private let measurementLabel = NSTextField(labelWithString: "")
+    private var fillWidths: (viewport: CGFloat, values: [CGFloat])?
 
     init(label: String, alignsContent: Bool = true) {
         self.alignsContent = alignsContent
@@ -312,10 +368,10 @@ final class ShortcutScroller: NSObject, NSScrubberDataSource, NSScrubberFlowLayo
         // Keep a hidden measuring label in this presentation's actual context.
         measurementLabel.isHidden = true
         scrollRegion.addSubview(measurementLabel)
-        NSLayoutConstraint.activate([
-            scrollRegion.heightAnchor.constraint(equalToConstant: ScrollingComponentStyle.height),
-            scrollRegion.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumWidth)
-        ])
+        scrollRegion.onMeasurementContextChange = { [weak self] in self?.reloadPresentation() }
+        let minimum = scrollRegion.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumWidth)
+        scrollRegion.minimumWidthConstraint = minimum
+        NSLayoutConstraint.activate([scrollRegion.heightAnchor.constraint(equalToConstant: ScrollingComponentStyle.height), minimum])
         if alignsContent {
             // Position a short list inside its viewport without making its natural
             // content width an Auto Layout limit on the customizable component.
@@ -342,7 +398,7 @@ final class ShortcutScroller: NSObject, NSScrubberDataSource, NSScrubberFlowLayo
             + CGFloat(max(0, items.count - 1)) * ScrollingComponentStyle.itemSpacing
         let width = fillsAvailableWidth ? bounds.width : min(bounds.width, max(1, contentWidth))
         let x: CGFloat
-        switch alignment {
+        switch fillsAvailableWidth ? .left : alignment {
         case .left: x = 0
         case .center: x = (bounds.width - width) / 2
         case .right: x = bounds.width - width
@@ -357,15 +413,24 @@ final class ShortcutScroller: NSObject, NSScrubberDataSource, NSScrubberFlowLayo
         reloadPresentation()
     }
     private func reloadPresentation() {
+        fillWidths = nil
         updateAlignment()
         scrubber.reloadData()
         scrubber.scrubberLayout.invalidateLayout()
+        onNaturalWidthChange?()
         scrubber.selectedIndex = -1
     }
     func numberOfItems(for scrubber: NSScrubber) -> Int { items.count }
     private func naturalWidth(for item: ScrollingComponentItem) -> CGFloat {
         ScrollingComponentItemView.width(for: item, displayMode: displayMode,
             measurementLabel: item.textStyle == nil ? nil : measurementLabel)
+    }
+    private func fillItemWidths() -> [CGFloat] {
+        if let fillWidths, fillWidths.viewport == scrubber.bounds.width { return fillWidths.values }
+        let widths = ComponentItemWidth.allocate(items.map { $0.fillWidth ?? .init() },
+            naturalWidths: items.map { naturalWidth(for: $0) }, available: scrubber.bounds.width)
+        fillWidths = (scrubber.bounds.width, widths)
+        return widths
     }
     func scrubber(_ scrubber: NSScrubber, viewForItemAt index: Int) -> NSScrubberItemView {
         let view = scrubber.makeItem(withIdentifier: .init("scrollingItem"), owner: self) as! ScrollingComponentItemView
@@ -375,8 +440,7 @@ final class ShortcutScroller: NSObject, NSScrubberDataSource, NSScrubberFlowLayo
     nonisolated func scrubber(_ scrubber: NSScrubber, layout: NSScrubberFlowLayout, sizeForItemAt index: Int) -> NSSize {
         MainActor.assumeIsolated {
             let width = fillsAvailableWidth
-                ? max(1, (scrubber.bounds.width - CGFloat(max(0, items.count - 1)) * ScrollingComponentStyle.itemSpacing)
-                    / CGFloat(max(1, items.count)))
+                ? fillItemWidths()[index]
                 : naturalWidth(for: items[index])
             return NSSize(width: width, height: ScrollingComponentStyle.height)
         }

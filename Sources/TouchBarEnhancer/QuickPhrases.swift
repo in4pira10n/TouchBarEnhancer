@@ -8,15 +8,16 @@ struct QuickPhrase: Codable, Equatable, Identifiable {
     var imageData: Data?
     var text: String
     var displayModeOverride: ComponentDisplayMode?
+    var fillWidth: ComponentItemWidth?
 
     var scrollingItem: ScrollingComponentItem {
         ScrollingComponentItem(title: name, symbol: symbol, imageData: imageData, background: .standard,
-            accessibilityLabel: "Paste \(name)", toolTip: "Paste \(name)", displayModeOverride: displayModeOverride)
+            accessibilityLabel: "Paste \(name)", toolTip: "Paste \(name)", displayModeOverride: displayModeOverride, fillWidth: fillWidth)
     }
 
     var displayShortcut: ChatShortcut {
         ChatShortcut(id: id, name: name, symbol: symbol, imageData: imageData, color: "#363636",
-            displayModeOverride: displayModeOverride)
+            displayModeOverride: displayModeOverride, fillWidth: fillWidth)
     }
 }
 

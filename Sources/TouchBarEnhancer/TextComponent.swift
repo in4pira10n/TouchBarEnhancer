@@ -1,5 +1,12 @@
 import AppKit
 
+/// The entire Text region, independently of its entries' Fill widths.
+struct TextComponentWidth: Codable, Equatable {
+    enum Mode: String, Codable, CaseIterable { case automatic = "Auto", fixed = "Fixed", hug = "Hug" }
+    var mode: Mode = .automatic
+    var fixed: Double = 75
+}
+
 /// Nil is a genuine system default, not a copied numeric approximation.
 struct TextComponentStyle: Codable, Equatable {
     enum Weight: String, Codable, CaseIterable {
@@ -74,18 +81,93 @@ struct TextComponentItem: Codable, Equatable, Identifiable {
     var id = UUID()
     var text = "Text"
     var style = TextComponentStyle()
+    var fillWidth: ComponentItemWidth?
     static let initial = [TextComponentItem(id: UUID(uuidString: "E3C60628-B679-4844-9EAF-D95DE9763EAA")!)]
     var scrollingItem: ScrollingComponentItem {
         ScrollingComponentItem(title: text, symbol: "", background: style.backgroundColor.map { .color($0) } ?? .none, accessibilityLabel: text,
-            toolTip: text, displayModeOverride: .iconAndText, textStyle: style)
+            toolTip: text, displayModeOverride: .iconAndText, textStyle: style, fillWidth: fillWidth)
     }
 }
 
 @MainActor
 final class TextComponent {
     let scroller = ShortcutScroller(label: "Text")
-    init(items: [TextComponentItem]) { configure(items) }
+    private var width = TextComponentWidth()
+    init(items: [TextComponentItem]) {
+        scroller.onNaturalWidthChange = { [weak self] in self?.updateWidth() }
+        configure(items)
+    }
     func configure(_ items: [TextComponentItem]) { scroller.configure(items.map(\.scrollingItem)) }
+    func configurePresentation(_ presentation: ComponentPresentation) {
+        width = presentation.textWidth ?? .init()
+        scroller.configurePresentation(presentation)
+        updateWidth()
+    }
+    private func updateWidth() {
+        let requested: CGFloat?
+        switch width.mode {
+        case .automatic: requested = nil
+        case .fixed: requested = max(1, CGFloat(ComponentItemWidth.valid(width.fixed) ? width.fixed : 75))
+        case .hug:
+            let scale = max(1, scroller.scrollRegion.window?.backingScaleFactor ?? 1)
+            requested = max(1, ceil(scroller.naturalContentWidth * scale) / scale)
+        }
+        scroller.scrollRegion.requestedWidth = requested
+    }
+}
+
+@MainActor
+final class TextComponentWidthControl: NSStackView {
+    private let store: SettingsStore
+    private let appBundleID: String
+    private let mode: ComponentInlinePopup
+    private let number: ComponentInlineTextField
+    private let unit = NSTextField(labelWithString: "pt")
+
+    init(store: SettingsStore, appBundleID: String) {
+        self.store = store; self.appBundleID = appBundleID
+        let width = store.presentation(for: "text", app: appBundleID).textWidth ?? .init()
+        mode = ComponentInlinePopup(titles: TextComponentWidth.Mode.allCases.map(\.rawValue),
+            selected: TextComponentWidth.Mode.allCases.firstIndex(of: width.mode)!)
+        number = ComponentInlineTextField(value: width.fixed.formatted(.number.grouping(.never).locale(Locale(identifier: "en_US_POSIX"))), placeholder: "75")
+        super.init(frame: .zero)
+        orientation = .horizontal; alignment = .centerY; spacing = 6
+        mode.setAccessibilityIdentifier("textComponentWidthMode")
+        mode.setAccessibilityLabel("Text component width")
+        mode.toolTip = "Auto shares space with other components. Fixed uses points. Hug fits the text content."
+        number.setAccessibilityIdentifier("textComponentWidthValue")
+        number.setAccessibilityLabel("Text component width in points")
+        number.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        unit.textColor = .secondaryLabelColor
+        addArrangedSubview(mode); addArrangedSubview(number); addArrangedSubview(unit)
+        number.isHidden = width.mode != .fixed; unit.isHidden = number.isHidden
+        mode.onChange = { [weak self] index in
+            guard let self else { return }
+            var presentation = self.store.presentation(for: "text", app: self.appBundleID)
+            var width = presentation.textWidth ?? .init()
+            width.mode = TextComponentWidth.Mode.allCases[index]
+            self.number.isHidden = width.mode != .fixed; self.unit.isHidden = self.number.isHidden
+            self.number.stringValue = width.fixed.formatted(.number.grouping(.never).locale(Locale(identifier: "en_US_POSIX")))
+            self.number.textColor = .labelColor
+            presentation.textWidth = width
+            self.store.setPresentation(presentation, for: "text", app: self.appBundleID)
+        }
+        number.onEdit = { [weak self] text in
+            guard let self else { return }
+            guard let value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)), ComponentItemWidth.valid(value) else {
+                self.number.textColor = .systemRed
+                self.number.toolTip = "Enter a positive number up to 1,000,000."
+                return
+            }
+            var presentation = self.store.presentation(for: "text", app: self.appBundleID)
+            var width = presentation.textWidth ?? .init()
+            guard width.mode == .fixed else { return }
+            width.fixed = value; presentation.textWidth = width
+            self.number.textColor = .labelColor
+            self.store.setPresentation(presentation, for: "text", app: self.appBundleID)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
 /// A native inline field keeps the same field editor while its value saves live.
@@ -148,12 +230,19 @@ final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableView
         body.orientation = .vertical; body.alignment = .leading; body.spacing = 10; body.isHidden = true
         addArrangedSubview(body); body.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
         let options = ComponentPresentationControls(store: store, appBundleID: appBundleID, component: "text", includesDisplay: false)
+        options.addRow(with: [NSTextField(labelWithString: "Width:"), TextComponentWidthControl(store: store, appBundleID: appBundleID)])
         body.addArrangedSubview(options)
         let column = NSTableColumn(identifier: .init("text")); column.title = "Text"; column.width = 420
+        column.minWidth = 150
         table.addTableColumn(column); table.rowHeight = 32; table.style = .inset
+        let widthColumn = NSTableColumn(identifier: .init("width")); widthColumn.title = "Width"
+        widthColumn.width = 195; widthColumn.minWidth = 185
+        widthColumn.isHidden = store.presentation(for: "text", app: appBundleID).layout != .fill
+        table.addTableColumn(widthColumn)
+        options.onLayoutChange = { [weak widthColumn] layout in widthColumn?.isHidden = layout != .fill }
         table.delegate = self; table.dataSource = self
         table.registerForDraggedTypes([Self.dragType]); table.setDraggingSourceOperationMask(.move, forLocal: true)
-        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
+        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.borderType = .bezelBorder
         body.addArrangedSubview(scroll)
         scroll.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         scroll.heightAnchor.constraint(equalToConstant: 126).isActive = true
@@ -244,13 +333,25 @@ final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableView
     func numberOfRows(in tableView: NSTableView) -> Int { items.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let item = items[row]
+        if tableColumn?.identifier.rawValue == "width" {
+            let control = ComponentItemWidthControl(value: item.fillWidth)
+            control.onChange = { [weak self] width in
+                guard let self, let index = self.items.firstIndex(where: { $0.id == item.id }) else { return }
+                self.items[index].fillWidth = width; self.store.save()
+            }
+            return control
+        }
         let field = ComponentInlineTextField(value: item.text, placeholder: "Text")
         field.setAccessibilityIdentifier("text.content.\(item.id)")
         field.onEdit = { [weak self] value in
             guard let self, let index = self.items.firstIndex(where: { $0.id == item.id }) else { return }
             self.items[index].text = value; self.store.save()
         }
-        return field
+        let cell = NSView()
+        field.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(field)
+        NSLayoutConstraint.activate([field.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+            field.trailingAnchor.constraint(equalTo: cell.trailingAnchor), field.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+        return cell
     }
     func tableViewSelectionDidChange(_ notification: Notification) { loadSelection() }
     private func loadSelection() {

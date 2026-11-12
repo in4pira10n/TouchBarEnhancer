@@ -44,6 +44,7 @@ struct KeyboardButton: Codable, Equatable, Identifiable {
     var shortcut: KeyboardShortcut?
     var description = ""
     var displayModeOverride: ComponentDisplayMode?
+    var fillWidth: ComponentItemWidth?
 
     var scrollingItem: ScrollingComponentItem {
         let key = shortcut?.display ?? "No shortcut"
@@ -52,12 +53,12 @@ struct KeyboardButton: Codable, Equatable, Identifiable {
         return ScrollingComponentItem(title: title, symbol: symbol, imageData: imageData,
             background: background.isEmpty || background.uppercased() == "#363636" ? .standard : .color(background),
             accessibilityLabel: "\(title), \(key)",
-            toolTip: detail.isEmpty ? "\(title) · \(key)" : "\(detail) · \(key)", displayModeOverride: displayModeOverride)
+            toolTip: detail.isEmpty ? "\(title) · \(key)" : "\(detail) · \(key)", displayModeOverride: displayModeOverride, fillWidth: fillWidth)
     }
 
     var displayShortcut: ChatShortcut {
         ChatShortcut(id: id, name: title, symbol: symbol, imageData: imageData, color: color,
-            displayModeOverride: displayModeOverride)
+            displayModeOverride: displayModeOverride, fillWidth: fillWidth)
     }
 }
 

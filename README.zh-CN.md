@@ -10,7 +10,7 @@
 
 - 通过苹果原生 **Customize Touch Bar…** 拖放面板，为每个 App 单独排列组件。
 - 所有 App 均可使用 **Keyboard Shortcuts（快捷键）**、**Quick Phrases（常用语）**、**Text（文字）**；兼容的 ChatGPT/Codex 版本另有专属控件。
-- 支持左对齐、居中、右对齐的 **Scrolling（滚动式）**，以及按钮等宽的 **Fill（铺满式）**。多个自适应组件平分剩余空间。
+- 支持左对齐、居中、右对齐的 **Scrolling（滚动式）**，以及逐项设置 Relative、Fixed、Hug 宽度的 **Fill（铺满式）**。多个自适应组件平分剩余空间。
 - 组件和单个按钮可分别设置 **Icon Only** / **Icon + Text**；按钮使用普通原生文本，空间不足时显示末尾省略号。
 - 即时编辑、列表拖动排序、按 App 独立保存配置，无需点击 Save。
 - 支持勾选模式、排除模式、单个 App 强制覆盖及全局暂停，默认静默启动。
@@ -74,14 +74,16 @@ open -g dist/TouchBarEnhancer.app
 | --- | --- |
 | Keyboard Shortcuts | 按 App 保存快捷键按钮，可定义图标、标题、可选背景色、快捷键及描述。在设置中直接录制组合键；清除背景色恢复通用灰色。 |
 | Quick Phrases | 按 App 保存常用语，通过 Command+V 粘贴到当前聚焦的输入框。不发送 Return；粘贴后剪贴板保留该短语。 |
-| Text | 按 App 保存文字条目，可调字体、字号、字重、颜色、字距、基线、对齐、装饰、截断及背景色。每个属性均有独立 Default。默认纯白文字、透明背景；添加背景后左右各留 4 pt 内边距。 |
+| Text | 按 App 保存文字条目，可调字体、字号、字重、颜色、字距、基线、对齐、装饰、截断及背景色。每个属性均有独立 Default。默认纯白文字、透明背景；添加背景后左右各留 4 pt 内边距。整个组件支持 Auto、Fixed、Hug 宽度。 |
 | Chat Shortcuts | 自定义聊天标题、Symbol/图片、颜色及 Control+1–9 槽位，用于专属 ChatGPT 布局。 |
 | Sidebar / Terminal | 通过目标 App 暴露的匹配菜单执行动作。Terminal 需要兼容的底部面板命令。 |
 | Space | 原生弹性空间，由用户在自定面板中主动添加。 |
 
-所有列表组件均支持 Scrolling 与 Fill。Fill 让条目平分组件宽度，内部间距为 8 pt；组件之间为 12 pt。富文本样式仅用于 Text，普通操作按钮保留原生普通文本。
+所有列表组件均支持 Scrolling 与 Fill。Fill 下可在表格的 **Width** 列逐项选择 **Relative**（相对权重，默认 12）、**Fixed**（点数）或 **Hug**（适应内容）。先扣除 Fixed/Hug 条目及间距，再按 Relative 权重分配剩余宽度；`6、6、12` 即 `1:1:2`，默认仍为均分。没有 Relative 条目时剩余空间留在尾部；Fixed/Hug 内容超宽时可以滚动。切换 Scrolling 后隐藏并忽略宽度设置，但保留其配置。按钮间距仍为 8 pt，组件间距仍为 12 pt。富文本样式仅用于 Text，普通操作按钮保留原生普通文本。
 
 ChatGPT 适配依靠本机菜单和用户配置的快捷键，**不会获取或同步置顶聊天列表**，不读取聊天内容，也不需要 API Key。菜单可用性及 Control+数字的行为取决于目标 App 和版本，请按实际快捷键配置槽位。Music、Safari 当前使用通用组件，尚无专属适配。
+
+Text 表格上方另有整个组件的 **Width** 设置，两种 Layout 下均可使用：**Auto** 保留原来的等分方式，**Fixed** 指定点数，**Hug** 适应整组文字内容。组件可收窄至小于 32 pt，并将释放的空间交给其他自适应组件。它独立于表格内每条文字的 Fill 宽度设置；间距及操作按钮的文字样式保持不变。
 
 ## 权限、数据与限制
 
@@ -101,6 +103,7 @@ ChatGPT 适配依靠本机菜单和用户配置的快捷键，**不会获取或�
 bash scripts/check-settings.sh
 bash scripts/check-settings-ui.sh
 bash scripts/check-component-layouts.sh
+bash scripts/check-component-widths.sh
 bash scripts/check-text-component.sh
 bash scripts/check-native-customization.sh
 swift build -c release
@@ -112,6 +115,8 @@ swift build -c release
 
 ```sh
 bash scripts/check-component-bar.sh
+bash scripts/check-component-widths-bar.sh
+bash scripts/check-text-region-width-bar.sh
 bash scripts/capture-touchbar.sh
 ```
 

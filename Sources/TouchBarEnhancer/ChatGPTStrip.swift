@@ -53,10 +53,11 @@ struct ChatShortcut: Codable, Equatable, Identifiable {
     var color: String = "blue"
     var slot: Int = 1
     var displayModeOverride: ComponentDisplayMode?
+    var fillWidth: ComponentItemWidth?
     var scrollingItem: ScrollingComponentItem {
         ScrollingComponentItem(title: name, symbol: symbol, imageData: imageData, background: .color(color),
             accessibilityLabel: "\(name), Control + \(slot)", toolTip: "\(name) · Control + \(slot)",
-            displayModeOverride: displayModeOverride)
+            displayModeOverride: displayModeOverride, fillWidth: fillWidth)
     }
     static let initial = (1...4).map { ChatShortcut(name: "Chat \($0)", color: ["blue", "teal", "orange", "orange"][$0 - 1], slot: $0) }
 }

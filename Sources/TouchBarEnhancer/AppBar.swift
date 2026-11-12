@@ -1,5 +1,29 @@
 import AppKit
 
+/// Only Text can request a compact region; other adaptive components share the remainder.
+@MainActor
+private enum ComponentRegionSizing {
+    static func constraints(_ regions: [ScrollingComponentRegion], available: CGFloat,
+                            scale: CGFloat, fillsAvailable: Bool) -> [NSLayoutConstraint] {
+        let compact = regions.filter { $0.requestedWidth != nil }
+        let adaptive = regions.filter { $0.requestedWidth == nil }
+        let requested = compact.reduce(CGFloat.zero) { $0 + ($1.requestedWidth ?? 0) }
+        let budget = max(CGFloat(compact.count), available - CGFloat(adaptive.count) * ShortcutScroller.minimumWidth)
+        let factor = requested > budget ? budget / requested : 1
+        let widths = compact.map { max(1, floor(($0.requestedWidth ?? 1) * factor * scale) / scale) }
+        var constraints = zip(compact, widths).map { $0.widthAnchor.constraint(equalToConstant: $1) }
+        if fillsAvailable {
+            let width = max(ShortcutScroller.minimumWidth,
+                floor((available - widths.reduce(0, +)) / CGFloat(max(1, adaptive.count)) * scale) / scale)
+            adaptive.forEach { $0.preferredWidth = width }
+            constraints += adaptive.map { $0.widthAnchor.constraint(equalToConstant: width) }
+        } else if let first = adaptive.first {
+            constraints += adaptive.dropFirst().map { $0.widthAnchor.constraint(equalTo: first.widthAnchor) }
+        }
+        return constraints
+    }
+}
+
 /// Keep system-modal presentation alive while replacing only its nested app layout.
 @MainActor
 final class AppBarHost: NSObject {
@@ -59,6 +83,9 @@ final class AppBarHost: NSObject {
                 (component.content as? ScrollingComponentRegion)?.onWindowChange = { [weak self] in
                     DispatchQueue.main.async { self?.sizeScrollingComponents() }
                 }
+                (component.content as? ScrollingComponentRegion)?.onWidthRequestChange = { [weak self] in
+                    DispatchQueue.main.async { self?.sizeScrollingComponents() }
+                }
             }
             DispatchQueue.main.async { [weak self] in self?.sizeScrollingComponents() }
         }
@@ -70,26 +97,15 @@ final class AppBarHost: NSObject {
               regions.allSatisfy({ $0.window === window }),
               componentViews.allSatisfy({ $0.window === window }) else { return }
         NSLayoutConstraint.deactivate(sizingConstraints)
-        sizingConstraints = regions.dropFirst().map { $0.widthAnchor.constraint(equalTo: first.widthAnchor) }
-        if !displayedIdentifiers.contains(.flexibleSpace) {
-            let fixed = componentViews.reduce(CGFloat.zero) { total, view in
-                total + view.leadingSpacing + (view.content is ScrollingComponentRegion ? 0 : view.content.fittingSize.width)
-            }
-            let nativeGaps = CGFloat(max(0, componentViews.count - 1)) * 8
-            let count = CGFloat(regions.count)
-            // The system owns the presentation window's width. Constraining its
-            // content root would let Auto Layout enlarge the root past that area.
-            let scale = max(1, window.backingScaleFactor)
-            // AppKit rounds item frames to backing pixels. Rounding three equal
-            // widths upward can overflow the bar and hide its final component.
-            let availableWidth = (window.frame.width - fixed - nativeGaps) / count
-            let width = max(ShortcutScroller.minimumWidth, floor(availableWidth * scale) / scale)
-            regions.forEach { $0.preferredWidth = width }
-            sizingConstraints = regions.map { $0.widthAnchor.constraint(equalToConstant: width) }
+        let fixed = componentViews.reduce(CGFloat.zero) { total, view in
+            total + view.leadingSpacing + (view.content is ScrollingComponentRegion ? 0 : view.content.fittingSize.width)
         }
-        // AppKit otherwise expands the last scrubber and may detach another
-        // item. Keep these equal sizes exact after clamping to the minimum.
-        sizingConstraints.forEach { $0.priority = .required }
+        let nativeGaps = CGFloat(max(0, componentViews.count - 1)) * 8
+        // Keep allocations inside the actual system window, rounded down to
+        // backing pixels. Compact Text releases space to the adaptive peers.
+        sizingConstraints = ComponentRegionSizing.constraints(regions,
+            available: window.frame.width - fixed - nativeGaps, scale: max(1, window.backingScaleFactor),
+            fillsAvailable: !displayedIdentifiers.contains(.flexibleSpace))
         NSLayoutConstraint.activate(sizingConstraints)
     }
 }
@@ -136,6 +152,8 @@ final class AppBar: NSObject, NSTouchBarDelegate {
     private var previewComponents: [NSTouchBarItem.Identifier: TouchBarComponentView] = [:]
     private var previewWidthConstraints: [NSLayoutConstraint] = []
     private var previewWidthContext: [ObjectIdentifier] = []
+    private var previewRequestedWidths: [CGFloat?] = []
+    private var previewAvailableWidth: CGFloat = 0
     private var shortcuts: [ChatShortcut]
     private var phrases: [QuickPhrase]
     private var keyboardConfiguration: KeyboardButtonsConfiguration
@@ -205,7 +223,7 @@ final class AppBar: NSObject, NSTouchBarDelegate {
             if let existing = textComponents.object(forKey: touchBar) { component = existing }
             else {
                 component = TextComponent(items: textItems)
-                component.scroller.configurePresentation(presentation(for: "text"))
+                component.configurePresentation(presentation(for: "text"))
                 textComponents.setObject(component, forKey: touchBar)
             }
             item.customizationLabel = "Text"
@@ -284,6 +302,7 @@ final class AppBar: NSObject, NSTouchBarDelegate {
         if touchBar === bar {
             previewComponents[identifier] = wrapper
             wrapper.onHierarchyChange = { [weak self] in self?.refreshPreviewWidths() }
+            (view as? ScrollingComponentRegion)?.onWidthRequestChange = { [weak self] in self?.refreshPreviewWidths() }
         }
         return wrapper
     }
@@ -298,19 +317,29 @@ final class AppBar: NSObject, NSTouchBarDelegate {
     }
 
     private func refreshPreviewWidths() {
-        let wrappers = bar.itemIdentifiers.compactMap { previewComponents[$0] }.filter { $0.content is ScrollingComponentRegion }
+        let allWrappers = bar.itemIdentifiers.compactMap { previewComponents[$0] }
+        let wrappers = allWrappers.filter { $0.content is ScrollingComponentRegion }
         var ancestor = wrappers.first?.superview
         while let candidate = ancestor, !wrappers.allSatisfy({ $0.isDescendant(of: candidate) }) { ancestor = candidate.superview }
-        guard wrappers.count > 1, let ancestor else {
+        guard !wrappers.isEmpty, let ancestor else {
             if !previewWidthConstraints.isEmpty { NSLayoutConstraint.deactivate(previewWidthConstraints) }
-            previewWidthConstraints.removeAll(); previewWidthContext.removeAll(); return
+            previewWidthConstraints.removeAll(); previewWidthContext.removeAll(); previewRequestedWidths.removeAll(); return
         }
+        let regions = wrappers.compactMap { $0.content as? ScrollingComponentRegion }
         let context = [ObjectIdentifier(ancestor)] + wrappers.map(ObjectIdentifier.init)
-        guard previewWidthContext != context else { return }
+        let requested = regions.map(\.requestedWidth)
+        let fixed = allWrappers.reduce(CGFloat.zero) { total, wrapper in
+            total + wrapper.leadingSpacing + (wrapper.content is ScrollingComponentRegion ? 0 : wrapper.content.fittingSize.width)
+        }
+        let available = ancestor.bounds.width - fixed - CGFloat(max(0, allWrappers.count - 1)) * 8
+        guard previewWidthContext != context || previewRequestedWidths != requested || previewAvailableWidth != available else { return }
         NSLayoutConstraint.deactivate(previewWidthConstraints)
-        previewWidthContext = context
-        let first = wrappers[0].content
-        previewWidthConstraints = wrappers.dropFirst().map { $0.content.widthAnchor.constraint(equalTo: first.widthAnchor) }
+        previewWidthContext = context; previewRequestedWidths = requested; previewAvailableWidth = available
+        // Keep native customization's own expansion behavior for normal peers.
+        previewWidthConstraints = ComponentRegionSizing.constraints(regions,
+            available: wrappers.count == 1 ? max(available, regions[0].requestedWidth ?? 0) : available,
+            scale: max(1, ancestor.window?.backingScaleFactor ?? 1),
+            fillsAvailable: requested.contains(where: { $0 != nil }) && !bar.itemIdentifiers.contains(.flexibleSpace))
         NSLayoutConstraint.activate(previewWidthConstraints)
     }
 
@@ -377,7 +406,7 @@ final class AppBar: NSObject, NSTouchBarDelegate {
         activeChatStrips.forEach { $0.scroller.configurePresentation(presentation(for: "chatgpt.chats")) }
         activePhraseComponents.forEach { $0.scroller.configurePresentation(presentation(for: "phrases")) }
         activeKeyboardComponents.forEach { $0.scroller.configurePresentation(presentation(for: "keyboard")) }
-        activeTextComponents.forEach { $0.scroller.configurePresentation(presentation(for: "text")) }
+        activeTextComponents.forEach { $0.configurePresentation(presentation(for: "text")) }
     }
 
     func configureText(_ items: [TextComponentItem]) {

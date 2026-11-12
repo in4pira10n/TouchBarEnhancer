@@ -61,7 +61,7 @@ struct TextComponentSmoke {
         descendants(editor).compactMap { $0 as? NSButton }.first { $0.title == "Text" }!.performClick(nil)
         host.layoutIfNeeded()
         let table = descendants(editor).compactMap { $0 as? NSTableView }.first!
-        let inline = table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! ComponentInlineTextField
+        let inline = descendants(table.view(atColumn: 0, row: 0, makeIfNecessary: true)!).compactMap { $0 as? ComponentInlineTextField }.first!
         precondition(host.makeFirstResponder(inline))
         let fieldEditor = inline.currentEditor() as! NSTextView
         fieldEditor.selectAll(nil); fieldEditor.insertText("Live text", replacementRange: fieldEditor.selectedRange())

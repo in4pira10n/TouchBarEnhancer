@@ -53,8 +53,9 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
 - All list components (Chat Shortcuts, Quick Phrases, Keyboard Shortcuts and Text)
   use `ComponentPresentation` and `ShortcutScroller`. Scrolling mode supports
   left/center/right alignment of the whole list; overflow scrolls naturally. Fill
-  mode assigns equal item widths inside the available region, with 8-point gaps,
-  no outer inset, and truncated labels when needed. Invalidate the scrubber layout
+  mode uses per-item Relative / Fixed / Hug width policies, with 8-point gaps,
+  no outer inset, and truncated labels when needed. Missing policies default to
+  Relative 12, preserving equal widths. Invalidate the scrubber layout
   when the viewport width or mode changes. Keep its manually positioned content
   out of canonical Auto Layout minimum-width measurement.
 - `SettingsStore.componentPresentations` stores layout/alignment per app and
@@ -71,8 +72,8 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   `ShortcutScroller.displayMode` owns rendering and measurement: Icon Only hides
   the title and its gap, centers the unchanged icon, and measures only the icon
   plus 16-point side padding. Retain full title, tooltip, accessibility label and
-  action data. Fill buttons remain equal width; scrolling buttons use the new
-  fitting width. Restore text when recycling a view back to Icon + Text.
+  action data. Fill allocation follows each item's width policy; Hug and scrolling
+  buttons use the new fitting width. Restore text when recycling a view back to Icon + Text.
 - Every chat, phrase and keyboard item has an optional `displayModeOverride`.
   `nil` follows the component; forced Icon Only / Icon + Text takes precedence
   for rendering and natural-width measurement. Optional decoding preserves old
@@ -85,6 +86,20 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
 - A view has only one superview. Never move the same NSView between a palette,
   Settings preview, and modal presentation. Share configuration/models, not
   presentation views. Keep ownership scoped to the actual Touch Bar context.
+- `ComponentItemWidth` is the shared per-entry Fill width policy for chats,
+  phrases, keyboard buttons and Text. Relative values are proportional weights,
+  default 12: 6/6/12 is 1:1:2, with no twelve-column limit. Fixed is in points;
+  Hug uses the same content/display-aware natural measurement as Scrolling.
+  Reserve Fixed/Hug widths and unchanged 8-point gaps, then split the remaining
+  width among Relative entries. If no Relative entries exist, leave trailing
+  space. If widths overflow, preserve Fixed/Hug and allow native scrolling;
+  Relative entries retain a 1-point minimum. Component boundaries stay 12 points.
+  Width controls appear only in Fill; Scrolling ignores but retains saved values.
+  Persist optional `fillWidth` with the stable item ID, preserving it during all
+  other edits and row reordering. Reject nonfinite/nonpositive values and values
+  above 1,000,000 without saving. Cache allocation per viewport and invalidate on
+  content, display mode, layout, or native measurement-context changes. Do not
+  expose these policies on fixed controls without a Fill layout.
 
 ## Plain text and system typography
 
@@ -97,7 +112,24 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   on each side; clearing/resetting that background restores zero padding. These
   are internal insets, never changes to the 8/12-point item/component gaps.
   Only the 12-point external component gap and 8-point gap between separate text
-  entries apply. Use natural text widths for Scrolling and equal cells for Fill.
+  entries apply. Use natural text widths for Scrolling and shared width policies
+  for Fill; Text Hug must measure in its actual presentation context.
+- Text also has a separate, per-app **component** Width setting: Auto preserves
+  equal peer allocation; Fixed reserves points for the entire Text region; Hug
+  fits the total natural text width, including 8-point entry gaps and any optional
+  4-point background insets. This setting is available in both layouts and is
+  independent of per-entry Fill policies. Store it in `ComponentPresentation.textWidth`;
+  layout/alignment edits must preserve it. Compact Text can shrink below the
+  normal 32-point viewport to a 1-point minimum. Its region and wrapper need high
+  horizontal hugging (but low compression resistance) so AppKit does not retain
+  a wide empty slot around a narrow view. Only Text sets `requestedWidth`;
+  button label typography, padding and natural measurement stay unchanged.
+  Both canonical native customization and the modal host reserve compact Text
+  first, then share remaining width among normal adaptive peers, preserving
+  explicit Space and 12-point component gaps. Clamp oversized requests to the
+  available area while retaining peers' minimum widths. Recompute Hug after
+  text/style/background edits and native context changes; never reuse a modal
+  allocation as the customizable item's intrinsic minimum.
 - `TextComponentStyle` stores optional font face, size, weight, italic, text color,
   opacity, tracking, baseline, underline, strikethrough, text alignment, overflow
   and background color.
@@ -249,6 +281,17 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   For layout/customization changes, also run native customization regression
   checks. Cover actual AppKit insertion/drop handling in both orders, not only
   setting `defaultItemIdentifiers` to an already-combined list.
+- `bash scripts/check-component-widths.sh` covers all four list categories,
+  legacy Relative defaults, ratios, mixed Fixed/Hug/Relative, Fill-only controls,
+  live edits, validation, resize, overflow, unchanged gaps and per-app persistence.
+  `bash scripts/check-component-widths-bar.sh` verifies actual hardware frames
+  and externally captures mixed widths, peer regions and Scrolling behavior.
+  Native customization fixtures include oversized Fixed and Hug content; row
+  reorder fixtures verify that width policies follow their stable items.
+  Text region tests also cover sub-32-point widths, Auto reset, layout changes,
+  per-app persistence, both native insertion orders and unchanged button labels.
+  `bash scripts/check-text-region-width-bar.sh` captures actual compact regions,
+  live Hug resizing, overflow clamping and the system Control Strip externally.
 - Keyboard component checks: `bash scripts/check-keyboard-buttons.sh` covers
   recording, per-app persistence, per-button/default colors, live edits, both
   modes and alignments. `bash scripts/check-keyboard-bar.sh` temporarily uses the

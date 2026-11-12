@@ -10,7 +10,7 @@ A native macOS menu bar app for building per-app Touch Bars with reusable compon
 
 - Per-app layouts using Apple's native **Customize Touch Bar…** drag-and-drop panel.
 - **Keyboard Shortcuts**, **Quick Phrases**, and **Text** components for any app, plus dedicated controls for supported ChatGPT/Codex variants.
-- **Scrolling** lists with left, center, or right alignment, or **Fill** layouts with equal-width buttons. Multiple adaptive components share the remaining space equally.
+- **Scrolling** lists with left, center, or right alignment, or **Fill** layouts with per-item Relative, Fixed, or Hug widths. Multiple adaptive components share the remaining space equally.
 - Per-component and per-button **Icon Only** / **Icon + Text** settings. Button titles use plain native text and truncate with an ellipsis when space is limited.
 - Live editing, draggable list ordering, and separate app configurations. No Save buttons.
 - Selection and exclusion policies, explicit per-app overrides, global pause, and silent launch enabled by default.
@@ -74,14 +74,16 @@ Pause other Touch Bar replacement tools while using this app to avoid competing 
 | --- | --- |
 | Keyboard Shortcuts | Per-app buttons with an icon, title, optional background, shortcut, and description. Record combinations directly in Settings. Clearing a background restores the standard gray. |
 | Quick Phrases | Per-app phrases pasted into the focused input with Command+V. Does not press Return; the inserted phrase remains on the clipboard. |
-| Text | Per-app text entries with font, size, weight, color, tracking, baseline, alignment, decoration, overflow, and optional background. Each property has its own Default action. Defaults to pure white on a clear background; adding a background enables 4 pt of horizontal padding per side. |
+| Text | Per-app text entries with font, size, weight, color, tracking, baseline, alignment, decoration, overflow, and optional background. Each property has its own Default action. Defaults to pure white on a clear background; adding a background enables 4 pt of horizontal padding per side. The entire component supports Auto, Fixed, and Hug widths. |
 | Chat Shortcuts | User-defined chat labels, symbols/images, colors, and Control+1–9 slots. Available with the dedicated ChatGPT layout. |
 | Sidebar / Terminal | Dedicated ChatGPT controls using matching menu actions when exposed by the target app. Terminal requires a compatible bottom-panel command. |
 | Space | Native flexible space, placed explicitly in the customization panel. |
 
-All list components support Scrolling and Fill. Fill divides the component's width equally between entries, with 8 pt gaps; separate components have 12 pt gaps. Text formatting applies only to the Text component. Standard action buttons retain native plain-text labels.
+All list components support Scrolling and Fill. In Fill, the table's **Width** column sets each entry to **Relative** (default weight 12), **Fixed** (points), or **Hug** (natural content width). Relative weights divide the space remaining after Fixed/Hug entries and gaps; `6, 6, 12` gives a `1:1:2` ratio. Default entries still share width equally. Without Relative entries, unused space stays at the end; oversized Fixed/Hug content scrolls. Switching to Scrolling hides and ignores these settings while preserving them. Item gaps stay 8 pt and component gaps stay 12 pt. Text formatting applies only to the Text component. Standard action buttons retain native plain-text labels.
 
 The ChatGPT adapter uses locally available menus and user-configured shortcuts. It **does not retrieve or synchronize pinned chats**, read conversations, or use an API key. Menu availability and Control+number behavior depend on the target app/version; configure slots to match its shortcuts. Music and Safari currently use generic components rather than dedicated integrations.
+
+Text also has its own **Width** setting above the entry table, available in both layouts: **Auto** keeps the previous equal share, **Fixed** reserves a width in points, and **Hug** fits the whole text list. Compact Text can be narrower than 32 pt and releases space to other adaptive components. This is separate from individual entries' Fill widths; gaps and action-button text styles stay unchanged.
 
 ## Permissions, data, and limitations
 
@@ -101,6 +103,7 @@ Project conventions and adapter design rules are in [AGENTS.md](AGENTS.md).
 bash scripts/check-settings.sh
 bash scripts/check-settings-ui.sh
 bash scripts/check-component-layouts.sh
+bash scripts/check-component-widths.sh
 bash scripts/check-text-component.sh
 bash scripts/check-native-customization.sh
 swift build -c release
@@ -112,6 +115,8 @@ For hardware layout verification, after packaging the signed app:
 
 ```sh
 bash scripts/check-component-bar.sh
+bash scripts/check-component-widths-bar.sh
+bash scripts/check-text-region-width-bar.sh
 bash scripts/capture-touchbar.sh
 ```
 
