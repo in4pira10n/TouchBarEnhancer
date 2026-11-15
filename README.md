@@ -1,7 +1,22 @@
 # TouchBarEnhancer
 
 English · [简体中文](README.zh-CN.md)
+---
 
+<img width="1004" height="30" alt="image" src="https://github.com/user-attachments/assets/bd93e3cc-dc58-490e-9507-49dd8db0da73" />
+↑ Customized ChatGPT Bar.
+
+
+
+<img width="1004" height="30" alt="image" src="https://github.com/user-attachments/assets/806bd62b-a930-468b-82c1-667b39ef7c76" />
+↑ Lyrics.
+
+
+
+<img width="1181" height="911" alt="image" src="https://github.com/user-attachments/assets/8eca2c08-bd99-4526-b7c2-280c8ea57c87" />
+↑ The customization window.
+
+---
 A native macOS menu bar app for building per-app Touch Bars with reusable components. Built with Swift and AppKit, without BetterTouchTool or a full Xcode installation.
 
 **Status:** early development, currently version 0.3.0. Requires macOS 14 or later and a MacBook Pro with a Touch Bar for hardware use. The app interface is in English.
