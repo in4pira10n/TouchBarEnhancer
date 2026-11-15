@@ -45,9 +45,10 @@ struct KeyboardButton: Codable, Equatable, Identifiable {
     var description = ""
     var displayModeOverride: ComponentDisplayMode?
     var fillWidth: ComponentItemWidth?
+    var menuCommand: MenuCommandBinding?
 
     var scrollingItem: ScrollingComponentItem {
-        let key = shortcut?.display ?? "No shortcut"
+        let key = menuCommand?.display ?? shortcut?.display ?? "No shortcut"
         let detail = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let background = color.trimmingCharacters(in: .whitespacesAndNewlines)
         return ScrollingComponentItem(title: title, symbol: symbol, imageData: imageData,
@@ -141,15 +142,18 @@ enum KeyboardShortcutSender {
 
 @MainActor
 final class KeyboardButtonsComponent {
-    let scroller = ShortcutScroller(label: "Keyboard Shortcuts", alignsContent: true)
+    let scroller: ShortcutScroller
     var region: ScrollingComponentRegion { scroller.scrollRegion }
     private var configuration: KeyboardButtonsConfiguration?
     private let targetBundleID: String
+    private let usesMenuCommands: Bool
     var onError: ((String) -> Void)?
     var onSelect: ((KeyboardButton) -> Void)?
 
-    init(targetBundleID: String, configuration: KeyboardButtonsConfiguration) {
+    init(targetBundleID: String, configuration: KeyboardButtonsConfiguration, usesMenuCommands: Bool = false) {
         self.targetBundleID = targetBundleID
+        self.usesMenuCommands = usesMenuCommands
+        scroller = ShortcutScroller(label: usesMenuCommands ? "Menu Commands" : "Keyboard Shortcuts", alignsContent: true)
         scroller.onSelect = { [weak self] index in self?.select(index) }
         configure(configuration)
     }
@@ -165,6 +169,9 @@ final class KeyboardButtonsComponent {
         guard let buttons = configuration?.buttons, buttons.indices.contains(index) else { return }
         let button = buttons[index]
         if let onSelect { onSelect(button); return }
-        if let error = KeyboardShortcutSender.send(button.shortcut, to: targetBundleID) { onError?(error) }
+        let error = usesMenuCommands
+            ? MenuCommandSender.send(button.menuCommand, to: targetBundleID)
+            : KeyboardShortcutSender.send(button.shortcut, to: targetBundleID)
+        if let error { onError?(error) }
     }
 }

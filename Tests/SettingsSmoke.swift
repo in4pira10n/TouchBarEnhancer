@@ -177,7 +177,7 @@ struct SettingsSmoke {
         precondition(SettingsStore(defaults: defaults).quickPhrasesByApp[chat.bundleID] == [phrase])
         precondition(phrase.displayShortcut.color == "#363636")
         let phraseBar = AppBar(app: chat, phrases: [phrase], persistsLayout: false)
-        precondition(phraseBar.bar.customizationAllowedItemIdentifiers == ["chatgpt.sidebar", "chatgpt.chats", "chatgpt.terminal", "phrases", "keyboard", "text"].map(AppBar.itemID) + [.flexibleSpace])
+        precondition(phraseBar.bar.customizationAllowedItemIdentifiers == ["chatgpt.sidebar", "chatgpt.chats", "chatgpt.terminal", "phrases", "keyboard", "menu", "text", "lyrics"].map(AppBar.itemID) + [.flexibleSpace])
         for name in ["name", "open", "counter", "reset", "clock", "settings", "hide"] {
             precondition(phraseBar.touchBar(phraseBar.bar, makeItemForIdentifier: AppBar.itemID(name)) == nil)
         }

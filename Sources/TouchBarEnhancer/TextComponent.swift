@@ -1,4 +1,5 @@
 import AppKit
+import os
 
 /// The entire Text region, independently of its entries' Fill widths.
 struct TextComponentWidth: Codable, Equatable {
@@ -120,37 +121,38 @@ final class TextComponent {
 final class TextComponentWidthControl: NSStackView {
     private let store: SettingsStore
     private let appBundleID: String
+    private let component: String
     private let mode: ComponentInlinePopup
     private let number: ComponentInlineTextField
     private let unit = NSTextField(labelWithString: "pt")
 
-    init(store: SettingsStore, appBundleID: String) {
-        self.store = store; self.appBundleID = appBundleID
-        let width = store.presentation(for: "text", app: appBundleID).textWidth ?? .init()
+    init(store: SettingsStore, appBundleID: String, component: String = "text") {
+        self.store = store; self.appBundleID = appBundleID; self.component = component
+        let width = store.presentation(for: component, app: appBundleID).textWidth ?? .init()
         mode = ComponentInlinePopup(titles: TextComponentWidth.Mode.allCases.map(\.rawValue),
             selected: TextComponentWidth.Mode.allCases.firstIndex(of: width.mode)!)
         number = ComponentInlineTextField(value: width.fixed.formatted(.number.grouping(.never).locale(Locale(identifier: "en_US_POSIX"))), placeholder: "75")
         super.init(frame: .zero)
         orientation = .horizontal; alignment = .centerY; spacing = 6
-        mode.setAccessibilityIdentifier("textComponentWidthMode")
-        mode.setAccessibilityLabel("Text component width")
-        mode.toolTip = "Auto shares space with other components. Fixed uses points. Hug fits the text content."
-        number.setAccessibilityIdentifier("textComponentWidthValue")
-        number.setAccessibilityLabel("Text component width in points")
+        mode.setAccessibilityIdentifier("\(component)ComponentWidthMode")
+        mode.setAccessibilityLabel("\(component.capitalized) component width")
+        mode.toolTip = "Auto shares space with other components. Fixed uses points. Hug fits the content."
+        number.setAccessibilityIdentifier("\(component)ComponentWidthValue")
+        number.setAccessibilityLabel("\(component.capitalized) component width in points")
         number.widthAnchor.constraint(equalToConstant: 60).isActive = true
         unit.textColor = .secondaryLabelColor
         addArrangedSubview(mode); addArrangedSubview(number); addArrangedSubview(unit)
         number.isHidden = width.mode != .fixed; unit.isHidden = number.isHidden
         mode.onChange = { [weak self] index in
             guard let self else { return }
-            var presentation = self.store.presentation(for: "text", app: self.appBundleID)
+            var presentation = self.store.presentation(for: self.component, app: self.appBundleID)
             var width = presentation.textWidth ?? .init()
             width.mode = TextComponentWidth.Mode.allCases[index]
             self.number.isHidden = width.mode != .fixed; self.unit.isHidden = self.number.isHidden
             self.number.stringValue = width.fixed.formatted(.number.grouping(.never).locale(Locale(identifier: "en_US_POSIX")))
             self.number.textColor = .labelColor
             presentation.textWidth = width
-            self.store.setPresentation(presentation, for: "text", app: self.appBundleID)
+            self.store.setPresentation(presentation, for: self.component, app: self.appBundleID)
         }
         number.onEdit = { [weak self] text in
             guard let self else { return }
@@ -159,15 +161,235 @@ final class TextComponentWidthControl: NSStackView {
                 self.number.toolTip = "Enter a positive number up to 1,000,000."
                 return
             }
-            var presentation = self.store.presentation(for: "text", app: self.appBundleID)
+            var presentation = self.store.presentation(for: self.component, app: self.appBundleID)
             var width = presentation.textWidth ?? .init()
             guard width.mode == .fixed else { return }
             width.fixed = value; presentation.textWidth = width
             self.number.textColor = .labelColor
-            self.store.setPresentation(presentation, for: "text", app: self.appBundleID)
+            self.store.setPresentation(presentation, for: self.component, app: self.appBundleID)
         }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+/// Presentation preferences only; playback and fetching are owned by the shared backend.
+struct LyricsComponentConfiguration: Codable, Equatable {
+    var fillWidth: ComponentItemWidth?
+    var style: TextComponentStyle?
+    static let defaultStyle = TextComponentStyle(alignment: .center, truncation: .tail)
+    var resolvedStyle: TextComponentStyle { style ?? Self.defaultStyle }
+}
+
+/// A lyrics-only hit surface. It occupies the allocated region without adding
+/// an intrinsic width or changing the shared scroller's text measurement.
+@MainActor
+final class LyricsInteractionView: NSView {
+    private let gestureLog = Logger(subsystem: "local.starfruit.TouchBarEnhancer", category: "LyricsTouch")
+    var onSearch: (() -> Void)?
+    var onSeek: ((TimeInterval) -> Void)?
+    private var origin: NSPoint?
+    private var maximumTravel: CGFloat = 0
+    private var cancelled = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        autoresizingMask = [.width, .height]
+        addGestureRecognizer(LyricsTouchRecognizer(target: nil, action: nil))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Lyrics")
+        setAccessibilityHelp("Open lyrics search. Swipe right to advance 5 seconds; left to rewind 5 seconds.")
+    }
+    required init?(coder: NSCoder) { nil }
+    override func accessibilityPerformPress() -> Bool {
+        guard window != nil, !isHiddenOrHasHiddenAncestor, let onSearch else { return false }
+        onSearch(); return true
+    }
+    func begin(at point: NSPoint) {
+        cancel()
+        guard window != nil, !isHiddenOrHasHiddenAncestor, bounds.contains(point) else { return }
+        origin = point; maximumTravel = 0; cancelled = false
+    }
+    func move(to point: NSPoint) {
+        guard let origin else { return }
+        maximumTravel = max(maximumTravel, hypot(point.x - origin.x, point.y - origin.y))
+        // Keep a horizontal swipe when the finger leaves the narrow region at
+        // either end. Leaving its vertical band cancels, as does a hidden view.
+        if point.y < bounds.minY - 8 || point.y > bounds.maxY + 8 || isHiddenOrHasHiddenAncestor { cancelled = true }
+    }
+    func end(at point: NSPoint) {
+        guard let origin else { gestureLog.notice("End without active origin"); return }
+        move(to: point)
+        let dx = point.x - origin.x, dy = point.y - origin.y
+        let valid = !cancelled && window != nil && !isHiddenOrHasHiddenAncestor
+        let travel = maximumTravel
+        cancel()
+        gestureLog.notice("Interaction ended: dx=\(dx, privacy: .public), dy=\(dy, privacy: .public), travel=\(travel, privacy: .public), valid=\(valid, privacy: .public)")
+        guard valid else { return }
+        if abs(dx) >= 20 && abs(dx) > abs(dy) * 2 { onSeek?(dx > 0 ? 5 : -5) }
+        else if travel <= 8, bounds.contains(point) { onSearch?() }
+    }
+    func cancel() { origin = nil; cancelled = true }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); cancel() }
+    override func viewDidHide() { super.viewDidHide(); cancel() }
+    override func mouseDown(with event: NSEvent) { begin(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseDragged(with event: NSEvent) { move(to: convert(event.locationInWindow, from: nil)) }
+    override func mouseUp(with event: NSEvent) { end(at: convert(event.locationInWindow, from: nil)) }
+}
+
+/// Claim direct touches before NSScrubber can turn a swipe release into a tap
+/// or scroll the current lyric out of view. Mouse events use the view fallback.
+@MainActor
+final class LyricsTouchRecognizer: NSGestureRecognizer {
+    private let gestureLog = Logger(subsystem: "local.starfruit.TouchBarEnhancer", category: "LyricsTouch")
+    private var identity: (any NSObjectProtocol)?
+    private var surface: LyricsInteractionView? { view as? LyricsInteractionView }
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action); allowedTouchTypes = .direct
+    }
+    required init?(coder: NSCoder) { nil }
+    override func touchesBegan(with event: NSEvent) {
+        super.touchesBegan(with: event)
+        let touches = event.touches(matching: .began, in: view).filter { $0.type == .direct }
+        gestureLog.notice("Touches began: count=\(touches.count, privacy: .public), state=\(self.state.rawValue, privacy: .public), tracked=\(self.identity != nil, privacy: .public)")
+        guard !touches.isEmpty else { return }
+        guard identity == nil, touches.count == 1, let touch = touches.first,
+              let surface, !surface.isHiddenOrHasHiddenAncestor,
+              surface.bounds.contains(touch.location(in: surface)) else { cancelTouch(); return }
+        identity = touch.identity; state = .began
+        surface.begin(at: touch.location(in: surface))
+    }
+    override func touchesMoved(with event: NSEvent) {
+        super.touchesMoved(with: event)
+        if let touch = tracked(event, phase: .moved), let surface {
+            state = .changed
+            surface.move(to: touch.location(in: surface))
+        }
+    }
+    override func touchesEnded(with event: NSEvent) {
+        super.touchesEnded(with: event)
+        gestureLog.notice("Touches ended: count=\(event.touches(matching: .ended, in: self.view).count, privacy: .public), state=\(self.state.rawValue, privacy: .public)")
+        guard let touch = tracked(event, phase: .ended), let surface else { return }
+        let point = touch.location(in: surface)
+        state = .ended
+        surface.end(at: point)
+    }
+    override func touchesCancelled(with event: NSEvent) {
+        super.touchesCancelled(with: event)
+        if tracked(event, phase: .cancelled) != nil { cancelTouch() }
+    }
+    private func tracked(_ event: NSEvent, phase: NSTouch.Phase) -> NSTouch? {
+        guard let identity else { return nil }
+        return event.touches(matching: phase, in: view).first { $0.type == .direct && identity.isEqual($0.identity) }
+    }
+    private func cancelTouch() {
+        gestureLog.notice("Touch cancelled: state=\(self.state.rawValue, privacy: .public)")
+        surface?.cancel(); state = state == .possible ? .failed : .cancelled
+    }
+    override func reset() {
+        gestureLog.notice("Recognizer reset: state=\(self.state.rawValue, privacy: .public)")
+        surface?.cancel(); identity = nil; super.reset()
+    }
+    override func canBePrevented(by preventingGestureRecognizer: NSGestureRecognizer) -> Bool { false }
+}
+
+@MainActor
+final class LyricsComponent {
+    static let placeholder = "No media playing"
+    private let content: TextComponent
+    private var configuration: LyricsComponentConfiguration
+    private var display = LyricsDisplay()
+    let interaction = LyricsInteractionView()
+    var onSearch: (() -> Void)?
+    var onSeek: ((TimeInterval) -> Void)?
+    var scroller: ShortcutScroller { content.scroller }
+
+    init(configuration: LyricsComponentConfiguration) {
+        self.configuration = configuration
+        content = TextComponent(items: [])
+        scroller.scrubber.setAccessibilityLabel("Lyrics")
+        interaction.frame = scroller.scrollRegion.bounds
+        scroller.scrollRegion.addSubview(interaction, positioned: .above, relativeTo: nil)
+        interaction.onSearch = { [weak self] in self?.onSearch?() }
+        interaction.onSeek = { [weak self] in self?.onSeek?($0) }
+        configure(configuration)
+        configurePresentation(.init(alignment: .center))
+    }
+
+    func configure(_ configuration: LyricsComponentConfiguration) {
+        self.configuration = configuration
+        render()
+    }
+
+    func configureDisplay(_ display: LyricsDisplay) {
+        guard self.display != display else { return }
+        if self.display.detail != display.detail { interaction.cancel() }
+        self.display = display; render()
+    }
+
+    private func render() {
+        content.configure([TextComponentItem(
+            id: UUID(uuidString: "FE191D66-BC0A-474B-9E8D-77803975F57C")!,
+            text: display.text, style: configuration.resolvedStyle,
+            fillWidth: configuration.fillWidth)])
+        scroller.scrubber.toolTip = display.detail
+        interaction.toolTip = "\(display.detail)\nTap to search lyrics · Swipe right +5s · Swipe left −5s"
+    }
+
+    func configurePresentation(_ presentation: ComponentPresentation) { content.configurePresentation(presentation) }
+}
+
+@MainActor
+final class LyricsComponentEditor: NSStackView {
+    private let store: SettingsStore
+    private let disclosure = NSButton()
+    private let body = NSStackView()
+
+    init(store: SettingsStore, appBundleID: String) {
+        self.store = store
+        super.init(frame: .zero)
+        orientation = .vertical; alignment = .leading; spacing = 8
+        setAccessibilityIdentifier("lyricsCategory")
+        disclosure.setButtonType(.pushOnPushOff); disclosure.bezelStyle = .disclosure; disclosure.title = ""
+        disclosure.target = self; disclosure.action = #selector(toggle)
+        disclosure.setAccessibilityLabel("Expand Lyrics")
+        let title = NSButton(title: "Lyrics", target: self, action: #selector(toggleTitle))
+        title.isBordered = false; title.font = .systemFont(ofSize: 13, weight: .semibold)
+        let header = NSStackView(views: [disclosure, title]); header.spacing = 4; header.alignment = .centerY
+        addArrangedSubview(header)
+        body.orientation = .vertical; body.alignment = .leading; body.spacing = 10; body.isHidden = true
+        addArrangedSubview(body); body.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        let options = ComponentPresentationControls(store: store, appBundleID: appBundleID, component: "lyrics", includesDisplay: false)
+        options.addRow(with: [NSTextField(labelWithString: "Width:"),
+            TextComponentWidthControl(store: store, appBundleID: appBundleID, component: "lyrics")])
+        let itemWidth = ComponentItemWidthControl(value: store.lyricsComponents[appBundleID]?.fillWidth)
+        itemWidth.setAccessibilityLabel("Lyric line width")
+        itemWidth.onChange = { value in
+            store.lyricsComponents[appBundleID, default: .init()].fillWidth = value
+            store.save()
+        }
+        let widthRow = options.addRow(with: [NSTextField(labelWithString: "Line width:"), itemWidth])
+        widthRow.isHidden = store.presentation(for: "lyrics", app: appBundleID).layout != .fill
+        options.onLayoutChange = { [weak widthRow] layout in widthRow?.isHidden = layout != .fill }
+        body.addArrangedSubview(options)
+        let typography = TextStyleEditor(namespace: "lyrics", defaults: LyricsComponentConfiguration.defaultStyle,
+            read: { store.lyricsComponents[appBundleID, default: .init()].resolvedStyle },
+            write: { value in
+                store.lyricsComponents[appBundleID, default: .init()].style = value == LyricsComponentConfiguration.defaultStyle ? nil : value
+                store.save()
+            })
+        body.addArrangedSubview(typography)
+        typography.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        let status = NSTextField(wrappingLabelWithString: "Timed lyrics from NetEase, QQ Music and LRCLIB. Searches only while this component is shown; results are cached locally.")
+        status.font = .systemFont(ofSize: NSFont.smallSystemFontSize); status.textColor = .secondaryLabelColor
+        body.addArrangedSubview(status)
+        status.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        body.addArrangedSubview(NSButton(title: "Search Lyrics & Sources…", target: self, action: #selector(openSearch)))
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func toggle() { body.isHidden = disclosure.state != .on }
+    @objc private func toggleTitle() { disclosure.state = disclosure.state == .on ? .off : .on; toggle() }
+    @objc private func openSearch() { NotificationCenter.default.post(name: .openLyricsSettings, object: store) }
 }
 
 /// A native inline field keeps the same field editor while its value saves live.
@@ -185,14 +407,13 @@ final class ComponentInlineTextField: NSTextField, NSTextFieldDelegate {
     func controlTextDidChange(_ notification: Notification) { onEdit?(stringValue) }
 }
 
-/// Text is a peer component. The list holds content; the inspector holds styling.
+/// Shared native typography editor for Text entries and the live Lyrics line.
 @MainActor
-final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSFontChanging {
-    private let store: SettingsStore
-    private let appBundleID: String
-    private let body = NSStackView()
-    private let disclosure = NSButton()
-    private let table = NSTableView()
+final class TextStyleEditor: NSStackView, NSTextFieldDelegate, NSFontChanging {
+    private let namespace: String
+    private let defaults: TextComponentStyle
+    private let readStyle: () -> TextComponentStyle?
+    private let writeStyle: (TextComponentStyle) -> Void
     private let inspector = NSStackView()
     private let fontButton = NSButton(title: "Choose Font…", target: nil, action: nil)
     private let colorWell = NSColorWell()
@@ -208,49 +429,15 @@ final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableView
     private let error = NSTextField(wrappingLabelWithString: "")
     private let advanced = NSStackView()
     private let advancedToggle = NSButton()
-    private static let dragType = NSPasteboard.PasteboardType("local.starfruit.TouchBarEnhancer.text-row")
-    private var items: [TextComponentItem] {
-        get { store.textComponents[appBundleID] ?? TextComponentItem.initial }
-        set { store.textComponents[appBundleID] = newValue }
-    }
-    private var selected: Int? { items.indices.contains(table.selectedRow) ? table.selectedRow : nil }
 
-    init(store: SettingsStore, appBundleID: String) {
-        self.store = store; self.appBundleID = appBundleID
+    init(namespace: String, defaults: TextComponentStyle = .init(),
+         read: @escaping () -> TextComponentStyle?, write: @escaping (TextComponentStyle) -> Void) {
+        self.namespace = namespace; self.defaults = defaults; readStyle = read; writeStyle = write
         super.init(frame: .zero)
         orientation = .vertical; alignment = .leading; spacing = 8
-        setAccessibilityIdentifier("textCategory")
-        disclosure.setButtonType(.pushOnPushOff); disclosure.bezelStyle = .disclosure; disclosure.title = ""
-        disclosure.target = self; disclosure.action = #selector(toggle)
-        disclosure.setAccessibilityLabel("Expand Text")
-        let title = NSButton(title: "Text", target: self, action: #selector(toggleTitle))
-        title.isBordered = false; title.font = .systemFont(ofSize: 13, weight: .semibold)
-        let header = NSStackView(views: [disclosure, title]); header.spacing = 4
-        addArrangedSubview(header)
-        body.orientation = .vertical; body.alignment = .leading; body.spacing = 10; body.isHidden = true
-        addArrangedSubview(body); body.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
-        let options = ComponentPresentationControls(store: store, appBundleID: appBundleID, component: "text", includesDisplay: false)
-        options.addRow(with: [NSTextField(labelWithString: "Width:"), TextComponentWidthControl(store: store, appBundleID: appBundleID)])
-        body.addArrangedSubview(options)
-        let column = NSTableColumn(identifier: .init("text")); column.title = "Text"; column.width = 420
-        column.minWidth = 150
-        table.addTableColumn(column); table.rowHeight = 32; table.style = .inset
-        let widthColumn = NSTableColumn(identifier: .init("width")); widthColumn.title = "Width"
-        widthColumn.width = 195; widthColumn.minWidth = 185
-        widthColumn.isHidden = store.presentation(for: "text", app: appBundleID).layout != .fill
-        table.addTableColumn(widthColumn)
-        options.onLayoutChange = { [weak widthColumn] layout in widthColumn?.isHidden = layout != .fill }
-        table.delegate = self; table.dataSource = self
-        table.registerForDraggedTypes([Self.dragType]); table.setDraggingSourceOperationMask(.move, forLocal: true)
-        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.borderType = .bezelBorder
-        body.addArrangedSubview(scroll)
-        scroll.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 126).isActive = true
-        let actions = NSStackView(views: [NSButton(title: "Add Text", target: self, action: #selector(add)),
-            NSButton(title: "Delete Text", target: self, action: #selector(remove))]); actions.spacing = 8
-        body.addArrangedSubview(actions)
+        setAccessibilityIdentifier("\(namespace)StyleEditor")
         inspector.orientation = .vertical; inspector.alignment = .leading; inspector.spacing = 8
-        body.addArrangedSubview(inspector); inspector.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        addArrangedSubview(inspector); inspector.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
         fontButton.target = self; fontButton.action = #selector(chooseFont)
         colorWell.target = self; colorWell.action = #selector(colorChanged)
         colorWell.widthAnchor.constraint(equalToConstant: 40).isActive = true
@@ -261,7 +448,7 @@ final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableView
         truncation.addItems(withTitles: ["System Default"] + TextComponentStyle.Truncation.allCases.map(\.rawValue))
         for (control, key) in [(weight, "weight"), (textAlignmentPopup, "alignment"), (truncation, "truncation")] {
             control.identifier = .init(key); control.target = self; control.action = #selector(popupChanged(_:))
-            control.setAccessibilityIdentifier("text.\(key)")
+            control.setAccessibilityIdentifier("\(namespace).\(key)")
         }
         for (control, key) in [(italic, "italic"), (underline, "underline"), (strike, "strikethrough")] {
             control.identifier = .init(key); control.target = self; control.action = #selector(checkChanged(_:))
@@ -269,8 +456,8 @@ final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableView
         var rows: [[NSView]] = []
         func row(_ label: String, _ value: NSView, _ key: String) {
             let reset = NSButton(title: "Default", target: self, action: #selector(reset(_:)))
-            reset.identifier = .init(key); reset.setAccessibilityIdentifier("text.default.\(key)")
-            reset.toolTip = "Restore the system default for \(label.lowercased())."
+            reset.identifier = .init(key); reset.setAccessibilityIdentifier("\(namespace).default.\(key)")
+            reset.toolTip = "Restore the default for \(label.lowercased())."
             rows.append([NSTextField(labelWithString: "\(label):"), value, reset])
         }
         row("Font", fontButton, "fontName")
@@ -316,49 +503,22 @@ final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableView
         advanced.addArrangedSubview(advancedGrid); advancedGrid.widthAnchor.constraint(equalTo: advanced.widthAnchor).isActive = true
         error.textColor = .systemRed; error.font = .systemFont(ofSize: NSFont.smallSystemFontSize); error.isHidden = true
         inspector.addArrangedSubview(error)
-        table.reloadData(); table.selectRowIndexes([0], byExtendingSelection: false); loadSelection()
+        reload()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     private func field(_ key: String, placeholder: String) -> NSTextField {
         let field = NSTextField(); field.placeholderString = placeholder; field.identifier = .init(key)
-        field.setAccessibilityIdentifier("text.\(key)"); field.delegate = self
+        field.setAccessibilityIdentifier("\(namespace).\(key)"); field.delegate = self
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         fields[key] = field; return field
     }
-    @objc private func toggle() { body.isHidden = disclosure.state != .on }
-    @objc private func toggleTitle() { disclosure.state = disclosure.state == .on ? .off : .on; toggle() }
     @objc private func toggleAdvanced() { advanced.isHidden = advancedToggle.state != .on }
     @objc private func toggleAdvancedTitle() { advancedToggle.state = advancedToggle.state == .on ? .off : .on; toggleAdvanced() }
-    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let item = items[row]
-        if tableColumn?.identifier.rawValue == "width" {
-            let control = ComponentItemWidthControl(value: item.fillWidth)
-            control.onChange = { [weak self] width in
-                guard let self, let index = self.items.firstIndex(where: { $0.id == item.id }) else { return }
-                self.items[index].fillWidth = width; self.store.save()
-            }
-            return control
-        }
-        let field = ComponentInlineTextField(value: item.text, placeholder: "Text")
-        field.setAccessibilityIdentifier("text.content.\(item.id)")
-        field.onEdit = { [weak self] value in
-            guard let self, let index = self.items.firstIndex(where: { $0.id == item.id }) else { return }
-            self.items[index].text = value; self.store.save()
-        }
-        let cell = NSView()
-        field.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(field)
-        NSLayoutConstraint.activate([field.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            field.trailingAnchor.constraint(equalTo: cell.trailingAnchor), field.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
-        return cell
-    }
-    func tableViewSelectionDidChange(_ notification: Notification) { loadSelection() }
-    private func loadSelection() {
+    func reload() {
         loading = true; defer { loading = false }
-        inspector.isHidden = selected == nil
-        guard let index = selected else { return }
-        let style = items[index].style
+        isHidden = readStyle() == nil
+        guard let style = readStyle() else { return }
         fontButton.title = style.fontName.flatMap { NSFont(name: $0, size: 0)?.displayName } ?? "System Default…"
         fields["fontSize"]?.stringValue = style.fontSize.map { String($0) } ?? ""
         fields["color"]?.stringValue = style.color ?? ""
@@ -376,8 +536,8 @@ final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableView
         error.isHidden = true
     }
     private func update(_ edit: (inout TextComponentStyle) -> Void) {
-        guard !loading, let index = selected else { return }
-        edit(&items[index].style); error.isHidden = true; store.save()
+        guard !loading, var style = readStyle() else { return }
+        edit(&style); error.isHidden = true; writeStyle(style)
     }
     func controlTextDidChange(_ notification: Notification) {
         guard let field = notification.object as? NSTextField, let key = field.identifier?.rawValue else { return }
@@ -441,38 +601,130 @@ final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableView
     @objc private func reset(_ sender: NSButton) {
         update { style in
             switch sender.identifier?.rawValue {
-            case "fontName": style.fontName = nil
-            case "fontSize": style.fontSize = nil
-            case "weight": style.weight = nil
-            case "italic": style.italic = nil
-            case "color": style.color = nil
-            case "opacity": style.opacity = nil
-            case "tracking": style.tracking = nil
-            case "baselineOffset": style.baselineOffset = nil
-            case "underline": style.underline = nil
-            case "strikethrough": style.strikethrough = nil
-            case "alignment": style.alignment = nil
-            case "truncation": style.truncation = nil
-            case "backgroundColor": style.backgroundColor = nil
+            case "fontName": style.fontName = defaults.fontName
+            case "fontSize": style.fontSize = defaults.fontSize
+            case "weight": style.weight = defaults.weight
+            case "italic": style.italic = defaults.italic
+            case "color": style.color = defaults.color
+            case "opacity": style.opacity = defaults.opacity
+            case "tracking": style.tracking = defaults.tracking
+            case "baselineOffset": style.baselineOffset = defaults.baselineOffset
+            case "underline": style.underline = defaults.underline
+            case "strikethrough": style.strikethrough = defaults.strikethrough
+            case "alignment": style.alignment = defaults.alignment
+            case "truncation": style.truncation = defaults.truncation
+            case "backgroundColor": style.backgroundColor = defaults.backgroundColor
             default: break
             }
         }
-        loadSelection()
+        reload()
     }
     @objc private func chooseFont() {
-        guard let index = selected else { return }
+        guard let style = readStyle() else { return }
         window?.makeFirstResponder(self)
         let manager = NSFontManager.shared
         manager.target = self; manager.action = #selector(changeFont(_:))
-        manager.setSelectedFont(items[index].style.font, isMultiple: false)
+        manager.setSelectedFont(style.font, isMultiple: false)
         manager.orderFrontFontPanel(self)
     }
     func changeFont(_ sender: NSFontManager?) {
-        guard let index = selected, window?.isKeyWindow == true, let sender else { return }
-        let font = sender.convert(items[index].style.font)
+        guard let style = readStyle(), !isHiddenOrHasHiddenAncestor, window?.isVisible == true,
+              let sender, sender.target as? TextStyleEditor === self else { return }
+        let font = sender.convert(style.font)
         update { $0.fontName = font.fontName; $0.fontSize = Double(font.pointSize); $0.weight = nil; $0.italic = nil }
-        loadSelection()
+        reload()
     }
+}
+
+/// Text is a peer component. The list holds content; the shared inspector holds styling.
+@MainActor
+final class TextComponentEditor: NSStackView, NSTableViewDataSource, NSTableViewDelegate {
+    private let store: SettingsStore
+    private let appBundleID: String
+    private let body = NSStackView()
+    private let disclosure = NSButton()
+    private let table = NSTableView()
+    private var styleEditor: TextStyleEditor!
+    private static let dragType = NSPasteboard.PasteboardType("local.starfruit.TouchBarEnhancer.text-row")
+    private var items: [TextComponentItem] {
+        get { store.textComponents[appBundleID] ?? TextComponentItem.initial }
+        set { store.textComponents[appBundleID] = newValue }
+    }
+    private var selected: Int? { items.indices.contains(table.selectedRow) ? table.selectedRow : nil }
+
+    init(store: SettingsStore, appBundleID: String) {
+        self.store = store; self.appBundleID = appBundleID
+        super.init(frame: .zero)
+        orientation = .vertical; alignment = .leading; spacing = 8
+        setAccessibilityIdentifier("textCategory")
+        disclosure.setButtonType(.pushOnPushOff); disclosure.bezelStyle = .disclosure; disclosure.title = ""
+        disclosure.target = self; disclosure.action = #selector(toggle)
+        disclosure.setAccessibilityLabel("Expand Text")
+        let title = NSButton(title: "Text", target: self, action: #selector(toggleTitle))
+        title.isBordered = false; title.font = .systemFont(ofSize: 13, weight: .semibold)
+        let header = NSStackView(views: [disclosure, title]); header.spacing = 4
+        addArrangedSubview(header)
+        body.orientation = .vertical; body.alignment = .leading; body.spacing = 10; body.isHidden = true
+        addArrangedSubview(body); body.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        let options = ComponentPresentationControls(store: store, appBundleID: appBundleID, component: "text", includesDisplay: false)
+        options.addRow(with: [NSTextField(labelWithString: "Width:"), TextComponentWidthControl(store: store, appBundleID: appBundleID)])
+        body.addArrangedSubview(options)
+        let column = NSTableColumn(identifier: .init("text")); column.title = "Text"; column.width = 420
+        column.minWidth = 150
+        table.addTableColumn(column); table.rowHeight = 32; table.style = .inset
+        let widthColumn = NSTableColumn(identifier: .init("width")); widthColumn.title = "Width"
+        widthColumn.width = 195; widthColumn.minWidth = 185
+        widthColumn.isHidden = store.presentation(for: "text", app: appBundleID).layout != .fill
+        table.addTableColumn(widthColumn)
+        options.onLayoutChange = { [weak widthColumn] layout in widthColumn?.isHidden = layout != .fill }
+        table.delegate = self; table.dataSource = self
+        table.registerForDraggedTypes([Self.dragType]); table.setDraggingSourceOperationMask(.move, forLocal: true)
+        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.borderType = .bezelBorder
+        body.addArrangedSubview(scroll)
+        scroll.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 126).isActive = true
+        let actions = NSStackView(views: [NSButton(title: "Add Text", target: self, action: #selector(add)),
+            NSButton(title: "Delete Text", target: self, action: #selector(remove))]); actions.spacing = 8
+        body.addArrangedSubview(actions)
+        styleEditor = TextStyleEditor(namespace: "text", read: { [weak self] in
+            guard let self, let index = self.selected else { return nil }
+            return self.items[index].style
+        }, write: { [weak self] value in
+            guard let self, let index = self.selected else { return }
+            self.items[index].style = value; self.store.save()
+        })
+        body.addArrangedSubview(styleEditor)
+        styleEditor.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        table.reloadData(); table.selectRowIndexes([0], byExtendingSelection: false); loadSelection()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func toggle() { body.isHidden = disclosure.state != .on }
+    @objc private func toggleTitle() { disclosure.state = disclosure.state == .on ? .off : .on; toggle() }
+    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let item = items[row]
+        if tableColumn?.identifier.rawValue == "width" {
+            let control = ComponentItemWidthControl(value: item.fillWidth)
+            control.onChange = { [weak self] width in
+                guard let self, let index = self.items.firstIndex(where: { $0.id == item.id }) else { return }
+                self.items[index].fillWidth = width; self.store.save()
+            }
+            return control
+        }
+        let field = ComponentInlineTextField(value: item.text, placeholder: "Text")
+        field.setAccessibilityIdentifier("text.content.\(item.id)")
+        field.onEdit = { [weak self] value in
+            guard let self, let index = self.items.firstIndex(where: { $0.id == item.id }) else { return }
+            self.items[index].text = value; self.store.save()
+        }
+        let cell = NSView()
+        field.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(field)
+        NSLayoutConstraint.activate([field.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+            field.trailingAnchor.constraint(equalTo: cell.trailingAnchor), field.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+        return cell
+    }
+    func tableViewSelectionDidChange(_ notification: Notification) { loadSelection() }
+    private func loadSelection() { styleEditor?.reload() }
     @objc private func add() {
         items.append(TextComponentItem()); store.save(); table.reloadData()
         table.selectRowIndexes([items.count - 1], byExtendingSelection: false); loadSelection()

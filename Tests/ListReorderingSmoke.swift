@@ -49,28 +49,38 @@ struct ListReorderingSmoke {
             KeyboardButton(title: "Button \($0)", shortcut: .init(keyCode: UInt16($0), modifiers: NSEvent.ModifierFlags.command.rawValue,
                 keyLabel: "\($0)"), description: "Action \($0)", displayModeOverride: $0 == 1 ? .iconOnly : nil, fillWidth: widths[$0 - 1])
         })
+        store.menuButtons[keyboardApp] = .init(buttons: (1...3).map {
+            KeyboardButton(title: "Menu \($0)", symbol: "menubar.rectangle", fillWidth: widths[$0 - 1],
+                menuCommand: .init(title: "Command \($0)", parentPath: "View"))
+        })
         let provider = AppBar(app: LayoutApp.builtIn[0], shortcuts: store.chatShortcuts,
-            phrases: store.quickPhrasesByApp[keyboardApp]!, keyboardButtons: store.keyboardButtons[keyboardApp]!, persistsLayout: false)
+            phrases: store.quickPhrasesByApp[keyboardApp]!, keyboardButtons: store.keyboardButtons[keyboardApp]!,
+            menuButtons: store.menuButtons[keyboardApp]!, persistsLayout: false)
         let chatView = (provider.bar.item(forIdentifier: AppBar.itemID("chatgpt.chats")) as! NSCustomTouchBarItem).view
         let phraseView = (provider.bar.item(forIdentifier: AppBar.itemID("phrases")) as! NSCustomTouchBarItem).view
         let chatScroller = descendants(chatView).compactMap { $0 as? NSScrubber }.first!
         let phraseScroller = descendants(phraseView).compactMap { $0 as? NSScrubber }.first!
         let keyboardView = (provider.bar.item(forIdentifier: AppBar.itemID("keyboard")) as! NSCustomTouchBarItem).view
         let keyboardScroller = descendants(keyboardView).compactMap { $0 as? NSScrubber }.first!
+        let menuView = (provider.bar.item(forIdentifier: AppBar.itemID("menu")) as! NSCustomTouchBarItem).view
+        let menuScroller = descendants(menuView).compactMap { $0 as? NSScrubber }.first!
         var changes = 0
         store.onChange = {
             changes += 1
             provider.configureChats(store.chatShortcuts)
             provider.configurePhrases(store.quickPhrasesByApp[keyboardApp]!)
             provider.configureKeyboardButtons(store.keyboardButtons[keyboardApp]!)
+            provider.configureMenuButtons(store.menuButtons[keyboardApp]!)
         }
-        for kind in [ShortcutCategoryEditor.Kind.chats, .phrases, .keyboard] {
+        for kind in [ShortcutCategoryEditor.Kind.chats, .phrases, .keyboard, .menu] {
             let editor = ShortcutCategoryEditor(store: store, kind: kind, appBundleID: keyboardApp)
             let table = descendants(editor).compactMap { $0 as? NSTableView }.first!
             precondition(!descendants(editor).compactMap { $0 as? NSTextField }.contains { !$0.isHidden && $0.stringValue == "SF Symbol" })
             let originalChats = store.chatShortcuts
             let originalPhrases = store.quickPhrasesByApp[keyboardApp]!
             let originalKeyboard = store.keyboardButtons[keyboardApp]!
+            let originalMenu = store.menuButtons[keyboardApp]!
+            let originalActions = kind == .menu ? originalMenu : originalKeyboard
             let pasteboard = NSPasteboard.withUniqueName()
             defer { pasteboard.releaseGlobally() }
             let writer = editor.tableView(table, pasteboardWriterForRow: 0)!
@@ -89,13 +99,15 @@ struct ListReorderingSmoke {
                 precondition(store.chatShortcuts == originalChats)
                 precondition(SettingsStore(defaults: defaults).quickPhrasesByApp == store.quickPhrasesByApp)
             } else {
-                precondition(store.keyboardButtons[keyboardApp]!.buttons == [originalKeyboard.buttons[1], originalKeyboard.buttons[2], originalKeyboard.buttons[0]])
+                let actions = kind == .menu ? store.menuButtons[keyboardApp]! : store.keyboardButtons[keyboardApp]!
+                precondition(actions.buttons == [originalActions.buttons[1], originalActions.buttons[2], originalActions.buttons[0]])
                 precondition(SettingsStore(defaults: defaults).keyboardButtons[keyboardApp] == store.keyboardButtons[keyboardApp])
+                precondition(SettingsStore(defaults: defaults).menuButtons[keyboardApp] == store.menuButtons[keyboardApp])
             }
-            let scroller = kind == .chats ? chatScroller : (kind == .phrases ? phraseScroller : keyboardScroller)
+            let scroller = kind == .chats ? chatScroller : (kind == .phrases ? phraseScroller : (kind == .menu ? menuScroller : keyboardScroller))
             let first = scroller.dataSource!.scrubber(scroller, viewForItemAt: 0)
             precondition(descendants(first).compactMap { $0 as? NSTextField }.contains {
-                $0.stringValue == (kind == .chats ? originalChats[1].name : (kind == .phrases ? originalPhrases[1].name : originalKeyboard.buttons[1].title))
+                $0.stringValue == (kind == .chats ? originalChats[1].name : (kind == .phrases ? originalPhrases[1].name : originalActions.buttons[1].title))
             }, "Active Touch Bar must update immediately after reordering")
             // Same stable ID still resolves correctly after its row changes.
             precondition(editor.tableView(table, validateDrop: drag, proposedRow: 0, proposedDropOperation: .above) == .move)
@@ -103,11 +115,12 @@ struct ListReorderingSmoke {
             precondition(table.selectedRow == 0)
             precondition(store.chatShortcuts == originalChats && store.quickPhrasesByApp[keyboardApp] == originalPhrases)
             precondition(store.keyboardButtons[keyboardApp] == originalKeyboard)
+            precondition(store.menuButtons[keyboardApp] == originalMenu)
             let titleCell = editor.tableView(table, viewFor: table.tableColumns[0], row: table.selectedRow)!
             let nameField = descendants(titleCell).compactMap { $0 as? NSTextField }.first {
                 $0.placeholderString == (kind == .chats ? "Chat name" : (kind == .phrases ? "Phrase title" : "Button title"))
             }!
-            precondition(nameField.stringValue == (kind == .chats ? originalChats[0].name : (kind == .phrases ? originalPhrases[0].name : originalKeyboard.buttons[0].title)))
+            precondition(nameField.stringValue == (kind == .chats ? originalChats[0].name : (kind == .phrases ? originalPhrases[0].name : originalActions.buttons[0].title)))
             precondition(editor.tableView(table, validateDrop: drag, proposedRow: 1, proposedDropOperation: .above).isEmpty)
             precondition(!editor.tableView(table, acceptDrop: drag, row: 1, dropOperation: .above))
             precondition(!editor.tableView(table, acceptDrop: drag, row: -1, dropOperation: .above))
@@ -120,10 +133,12 @@ struct ListReorderingSmoke {
             case .chats: store.chatShortcuts.removeFirst()
             case .phrases: store.quickPhrasesByApp[keyboardApp]!.removeFirst()
             case .keyboard: store.keyboardButtons[keyboardApp]!.buttons.removeFirst()
+            case .menu: store.menuButtons[keyboardApp]!.buttons.removeFirst()
             }
             precondition(!editor.tableView(table, acceptDrop: drag, row: 2, dropOperation: .above), "Reject deleted drag IDs")
             store.chatShortcuts = originalChats; store.quickPhrasesByApp[keyboardApp] = originalPhrases
             store.keyboardButtons[keyboardApp] = originalKeyboard
+            store.menuButtons[keyboardApp] = originalMenu
             print("\(kind.title) reordering checks passed")
         }
         precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground)

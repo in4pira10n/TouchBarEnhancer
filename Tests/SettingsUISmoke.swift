@@ -75,7 +75,8 @@ struct SettingsUISmoke {
         render(pane, "apps-chatgpt")
         let allCategories = descendants(pane).compactMap { $0 as? ShortcutCategoryEditor }
         precondition(allCategories.contains { $0.kind == .keyboard })
-        let categories = allCategories.filter { $0.kind != .keyboard }
+        precondition(allCategories.contains { $0.kind == .menu })
+        let categories = allCategories.filter { $0.kind == .chats || $0.kind == .phrases }
         precondition(categories.count == 2)
         precondition(!descendants(pane).compactMap { $0 as? NSButton }.contains { $0.title.hasPrefix("Save ") })
         var fieldOrigins: [CGFloat] = []

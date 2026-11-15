@@ -189,7 +189,7 @@ final class ControlStripAutomationMonitor {
 
 enum ControlStripAction: String, Codable, CaseIterable {
     case none, toggleEnhancement, pasteClipboard, pasteText, copyText, keyboardShortcut, runShortcut, openURL
-    case previousMedia, nextMedia
+    case previousMedia, nextMedia, showEnhancedBar
 
     var title: String {
         switch self {
@@ -203,6 +203,7 @@ enum ControlStripAction: String, Codable, CaseIterable {
         case .openURL: "Open URL"
         case .previousMedia: "Previous Media"
         case .nextMedia: "Next Media"
+        case .showEnhancedBar: "Show Enhanced Touch Bar"
         }
     }
 }
@@ -378,6 +379,8 @@ final class ControlStripSettingsPane: NSView, NSTextFieldDelegate, NSTextViewDel
     private let ruleName = NSTextField(string: "")
     private let bluetoothCondition = NSButton(checkboxWithTitle: "Bluetooth device is connected", target: nil, action: nil)
     private let mediaCondition = NSButton(checkboxWithTitle: "Music / media is playing", target: nil, action: nil)
+    private let editEnhancedBar = NSButton(title: "Customize Enhanced Bar…", target: nil, action: nil)
+    var onEditEnhancedBar: (() -> Void)?
     private let device = NSPopUpButton()
     private let automationStatus = NSTextField(wrappingLabelWithString: "Currently using: Default")
     private var activeName: String?
@@ -403,7 +406,7 @@ final class ControlStripSettingsPane: NSView, NSTextFieldDelegate, NSTextViewDel
         get { configuration.binding(for: selectedInteraction) }
         set { configuration.setBinding(newValue, for: selectedInteraction) }
     }
-    private enum Row: Int { case heading, summary, ruleName, enabled, conditionsHeading, bluetooth, device, media, conditionFeedback, buttonHeading, visibility, hiddenExplanation, symbol, interaction, duration, action, keyboard, shortcutName, input, text, url, feedback }
+    private enum Row: Int { case heading, summary, ruleName, enabled, conditionsHeading, bluetooth, device, media, conditionFeedback, buttonHeading, visibility, hiddenExplanation, symbol, interaction, duration, action, enhancedBar, keyboard, shortcutName, input, text, url, feedback }
 
     init(store: SettingsStore) {
         self.store = store
@@ -514,6 +517,9 @@ final class ControlStripSettingsPane: NSView, NSTextFieldDelegate, NSTextViewDel
         action.target = self; action.action = #selector(changeAction)
         action.setAccessibilityIdentifier("stripAction")
         action.setAccessibilityLabel("Control Strip action")
+        editEnhancedBar.target = self; editEnhancedBar.action = #selector(customizeEnhancedBar)
+        editEnhancedBar.setAccessibilityIdentifier("stripEditEnhancedBar")
+        editEnhancedBar.toolTip = "Configure the shared bar. Repeat the assigned Control Strip interaction to show or hide it."
         recorder.shortcut = config.keyboardShortcut
         recorder.onChange = { [weak self] in
             guard let self else { return }
@@ -572,6 +578,7 @@ final class ControlStripSettingsPane: NSView, NSTextFieldDelegate, NSTextViewDel
             [NSTextField(labelWithString: "Interaction:"), interaction],
             [NSTextField(labelWithString: "Hold for:"), durationRow],
             [NSTextField(labelWithString: "Action:"), action],
+            [NSView(), editEnhancedBar],
             [NSTextField(labelWithString: "Shortcut:"), recorder],
             [NSTextField(labelWithString: "Shortcut:"), shortcutName],
             [NSTextField(labelWithString: "Input:"), shortcutInput],
@@ -680,6 +687,7 @@ final class ControlStripSettingsPane: NSView, NSTextFieldDelegate, NSTextViewDel
     private func updateFields() {
         let config = configuration
         let binding = actionBinding
+        grid.row(at: Row.enhancedBar.rawValue).isHidden = !config.showsButton || binding.action != .showEnhancedBar
         grid.row(at: Row.keyboard.rawValue).isHidden = binding.action != .keyboardShortcut
         grid.row(at: Row.shortcutName.rawValue).isHidden = binding.action != .runShortcut
         grid.row(at: Row.input.rawValue).isHidden = binding.action != .runShortcut
@@ -705,6 +713,7 @@ final class ControlStripSettingsPane: NSView, NSTextFieldDelegate, NSTextViewDel
         grid.row(at: Row.feedback.rawValue).isHidden = feedback.stringValue.isEmpty
     }
     func showActionError(_ message: String?) { actionError = message; updateFields() }
+    @objc private func customizeEnhancedBar() { onEditEnhancedBar?() }
     private func save() {
         actionError = nil; store.save(); updateFields(); updateProfileSummaries()
         showActiveAutomation(activeName, buttonVisible: activeButtonVisible, playbackUnavailable: playbackUnavailable)
@@ -1016,6 +1025,7 @@ final class ControlStripActionRunner {
     var openURL: (URL) -> Bool = { NSWorkspace.shared.open($0) }
     // Injected by AppDelegate so native editor tests never control playback.
     var skipMedia: (_ forward: Bool) -> Bool = { _ in false }
+    var toggleEnhancedBar: () -> Void = {}
     var targetBundleID: () -> String? = {
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
@@ -1033,6 +1043,7 @@ final class ControlStripActionRunner {
         switch config.action {
         case .none: return
         case .toggleEnhancement: toggle()
+        case .showEnhancedBar: toggleEnhancedBar()
         case .pasteClipboard:
             guard !(pasteboard.pasteboardItems ?? []).isEmpty else { onError?("The clipboard is empty."); return }
             // Send Paste without rewriting the clipboard, preserving images/files.

@@ -34,13 +34,26 @@ final class SettingsStore {
     var chatShortcuts: [ChatShortcut] = ChatShortcut.initial
     var quickPhrasesByApp: [String: [QuickPhrase]] = [:]
     var keyboardButtons: [String: KeyboardButtonsConfiguration] = [:]
+    var menuButtons: [String: KeyboardButtonsConfiguration] = [:]
     var componentDisplayModes: [String: [String: ComponentDisplayMode]] = [:]
     var componentPresentations: [String: [String: ComponentPresentation]] = [:]
     var textComponents: [String: [TextComponentItem]] = [:]
+    var lyricsComponents: [String: LyricsComponentConfiguration] = [:]
+    var lyricsSearch = LyricsSearchPreferences()
+    private(set) var lastSettingsPane = "applications"
     var onChange: (() -> Void)?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        if let pane = defaults.string(forKey: "lastSettingsPane"),
+           ["general", "controlStrip", "enhancedBar", "lyrics", "applications", "apps"].contains(pane) { lastSettingsPane = pane }
+        if let data = defaults.data(forKey: "lyricsSearch"), let saved = try? JSONDecoder().decode(LyricsSearchPreferences.self, from: data) {
+            lyricsSearch = saved
+        }
+        if let data = defaults.data(forKey: "lyricsComponents"),
+           let saved = try? JSONDecoder().decode([String: LyricsComponentConfiguration].self, from: data) {
+            lyricsComponents = saved
+        }
         if let data = defaults.data(forKey: "componentPresentations"),
            let saved = try? JSONDecoder().decode([String: [String: ComponentPresentation]].self, from: data) {
             componentPresentations = saved
@@ -63,6 +76,8 @@ final class SettingsStore {
         }
         if let data = defaults.data(forKey: "keyboardButtons"),
            let saved = try? JSONDecoder().decode([String: KeyboardButtonsConfiguration].self, from: data) { keyboardButtons = saved }
+        if let data = defaults.data(forKey: "menuButtons"),
+           let saved = try? JSONDecoder().decode([String: KeyboardButtonsConfiguration].self, from: data) { menuButtons = saved }
         chatGPTControlsEnabled = defaults.object(forKey: "chatGPTControlsEnabled") as? Bool ?? true
         if let data = defaults.data(forKey: "chatShortcuts"),
            let saved = try? JSONDecoder().decode([ChatShortcut].self, from: data) { chatShortcuts = saved }
@@ -83,7 +98,7 @@ final class SettingsStore {
             // One-time copies preserve existing content without a shared fallback
             // for apps added later. Retain the old key as an untouched backup.
             let knownApps = Set((LayoutApp.builtIn + layoutApps).map(\.bundleID) + rules.map(\.bundleID)
-                + Array(keyboardButtons.keys) + Array(componentDisplayModes.keys) + Array(componentPresentations.keys)
+                + Array(keyboardButtons.keys) + Array(menuButtons.keys) + Array(componentDisplayModes.keys) + Array(componentPresentations.keys)
                 + Array(textComponents.keys) + Array(selectedAppIDs))
             quickPhrasesByApp = Dictionary(uniqueKeysWithValues: knownApps.map { ($0, legacy) })
             if let migrated = try? JSONEncoder().encode(quickPhrasesByApp) {
@@ -96,11 +111,20 @@ final class SettingsStore {
         rules.first { $0.bundleID == bundleID }?.mode ?? .auto
     }
 
+    func rememberSettingsPane(_ identifier: String) {
+        lastSettingsPane = identifier
+        defaults.set(identifier, forKey: "lastSettingsPane")
+    }
+
     func presentation(for component: String, app bundleID: String) -> ComponentPresentation {
         if let saved = componentPresentations[bundleID]?[component] { return saved }
         if component == "keyboard", let old = keyboardButtons[bundleID] {
             return ComponentPresentation(layout: old.layout, alignment: old.alignment)
         }
+        if component == "menu", let config = menuButtons[bundleID] {
+            return ComponentPresentation(layout: config.layout, alignment: config.alignment)
+        }
+        if component == "lyrics" { return .init(alignment: .center) }
         return .init()
     }
 
@@ -110,6 +134,10 @@ final class SettingsStore {
         if component == "keyboard" {
             keyboardButtons[bundleID, default: .init()].layout = value.layout
             keyboardButtons[bundleID, default: .init()].alignment = value.alignment
+        }
+        if component == "menu" {
+            menuButtons[bundleID, default: .init()].layout = value.layout
+            menuButtons[bundleID, default: .init()].alignment = value.alignment
         }
         save()
     }
@@ -145,7 +173,10 @@ final class SettingsStore {
         if let data = try? JSONEncoder().encode(componentDisplayModes) { defaults.set(data, forKey: "componentDisplayModes") }
         if let data = try? JSONEncoder().encode(componentPresentations) { defaults.set(data, forKey: "componentPresentations") }
         if let data = try? JSONEncoder().encode(textComponents) { defaults.set(data, forKey: "textComponents") }
+        if let data = try? JSONEncoder().encode(lyricsComponents) { defaults.set(data, forKey: "lyricsComponents") }
+        if let data = try? JSONEncoder().encode(lyricsSearch) { defaults.set(data, forKey: "lyricsSearch") }
         if let data = try? JSONEncoder().encode(keyboardButtons) { defaults.set(data, forKey: "keyboardButtons") }
+        if let data = try? JSONEncoder().encode(menuButtons) { defaults.set(data, forKey: "menuButtons") }
         if let data = try? JSONEncoder().encode(chatShortcuts) { defaults.set(data, forKey: "chatShortcuts") }
         if let data = try? JSONEncoder().encode(quickPhrasesByApp) { defaults.set(data, forKey: "quickPhrasesByApp") }
         if let data = try? JSONEncoder().encode(layoutApps) { defaults.set(data, forKey: "layoutApps") }
@@ -170,29 +201,44 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let applicationsID = NSToolbarItem.Identifier("applications")
     private let appsID = NSToolbarItem.Identifier("apps")
     private let controlStripID = NSToolbarItem.Identifier("controlStrip")
+    private let enhancedBarID = NSToolbarItem.Identifier("enhancedBar")
+    private let lyricsID = NSToolbarItem.Identifier("lyrics")
+    private var lyricsPane: LyricsSettingsPane!
     private var controlStripPane: ControlStripSettingsPane!
     private var appsPane: AppsPane!
+    private var enhancedBarPane: AppsPane!
     private var showingApps = false
+    private var showingEnhancedBar = false
     private weak var currentPane: NSView?
     private var paneSizes: [ObjectIdentifier: NSSize] = [:]
     var onPreviewApp: ((LayoutApp?) -> Void)?
     var onCustomizeApp: ((LayoutApp) -> Void)?
     private let generalStatusLabel = NSTextField(wrappingLabelWithString: "")
 
-    init(store: SettingsStore) {
+    init(store: SettingsStore, lyricsModel: LyricsSearchModel? = nil) {
         self.store = store
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 590, height: 480),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Applications"
         window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
+        window.standardWindowButton(.zoomButton)?.isEnabled = false
         window.contentMinSize = NSSize(width: 590, height: 480)
         super.init(window: window)
         window.delegate = self
         window.center()
         buildContent()
         buildGeneralPane()
+        lyricsPane = LyricsSettingsPane(store: store, model: lyricsModel ?? LyricsSearchModel(repository: LyricsRepository(preferences: store.lyricsSearch)))
+        NotificationCenter.default.addObserver(self, selector: #selector(openLyricsSettings), name: .openLyricsSettings, object: store)
         controlStripPane = ControlStripSettingsPane(store: store)
+        controlStripPane.onEditEnhancedBar = { [weak self] in self?.selectEnhancedBar() }
+        enhancedBarPane = AppsPane(store: store, standaloneApp: .enhancedBar)
+        enhancedBarPane.onSelect = { [weak self] app in
+            guard let self, self.showingEnhancedBar else { return }
+            self.onPreviewApp?(app)
+        }
+        enhancedBarPane.onCustomize = { [weak self] app in self?.onCustomizeApp?(app) }
         appsPane = AppsPane(store: store)
         appsPane.onSelect = { [weak self] app in
             guard let self, self.showingApps else { return }
@@ -204,8 +250,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         toolbar.displayMode = .iconAndLabel
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        toolbar.selectedItemIdentifier = applicationsID
-        showPane(applicationsPane)
+        if let item = self.toolbar(toolbar, itemForItemIdentifier: .init(store.lastSettingsPane), willBeInsertedIntoToolbar: false) {
+            selectPane(item)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -333,20 +380,30 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [generalID, controlStripID, applicationsID, appsID]
+        [generalID, controlStripID, enhancedBarID, lyricsID, applicationsID, appsID]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [generalID, controlStripID, applicationsID, appsID]
+        [generalID, controlStripID, enhancedBarID, lyricsID, applicationsID, appsID]
     }
 
     func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [generalID, controlStripID, applicationsID, appsID]
+        [generalID, controlStripID, enhancedBarID, lyricsID, applicationsID, appsID]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: identifier)
+        if identifier == lyricsID {
+            item.label = "Lyrics"; item.image = NSImage(systemSymbolName: "music.note.list", accessibilityDescription: "Lyrics")
+            item.target = self; item.action = #selector(selectPane(_:)); return item
+        }
+        if identifier == enhancedBarID {
+            item.label = "Enhanced Bar"
+            item.image = NSImage(systemSymbolName: LayoutApp.enhancedBarSymbol, accessibilityDescription: item.label)
+            item.target = self; item.action = #selector(selectPane(_:))
+            return item
+        }
         if identifier == controlStripID {
             item.label = "Control Strip"
             item.image = NSImage(systemSymbolName: "rectangle.bottomthird.inset.filled", accessibilityDescription: item.label)
@@ -364,11 +421,20 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func selectPane(_ sender: NSToolbarItem) {
         let general = sender.itemIdentifier == generalID
         showingApps = sender.itemIdentifier == appsID
+        showingEnhancedBar = sender.itemIdentifier == enhancedBarID
         window?.title = sender.label
-        if showingApps {
+        window?.toolbar?.selectedItemIdentifier = sender.itemIdentifier
+        lyricsPane.model.setActive(sender.itemIdentifier == lyricsID && window?.isVisible == true)
+        if showingEnhancedBar {
+            showPane(enhancedBarPane, size: NSSize(width: 760, height: 520))
+            enhancedBarPane.beginPreview()
+        } else if showingApps {
             showPane(appsPane, size: NSSize(width: 760, height: 520))
             appsPane.refresh()
             appsPane.beginPreview()
+        } else if sender.itemIdentifier == lyricsID {
+            onPreviewApp?(nil)
+            showPane(lyricsPane, size: NSSize(width: 760, height: 650))
         } else if sender.itemIdentifier == controlStripID {
             onPreviewApp?(nil)
             showPane(controlStripPane, size: NSSize(width: 820, height: 560))
@@ -377,6 +443,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             showPane(general ? generalPane : applicationsPane,
                 size: NSSize(width: 590, height: general ? 200 : 480))
         }
+        store.rememberSettingsPane(sender.itemIdentifier.rawValue)
+    }
+
+    private func selectEnhancedBar() {
+        let item = NSToolbarItem(itemIdentifier: enhancedBarID)
+        item.label = "Enhanced Bar"
+        selectPane(item)
+    }
+
+    @objc func openLyricsSettings() {
+        let item = NSToolbarItem(itemIdentifier: lyricsID); item.label = "Lyrics"; selectPane(item)
     }
 
     private func resizeContent(to size: NSSize) {
@@ -387,12 +464,15 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     func windowWillClose(_ notification: Notification) {
+        lyricsPane.model.setActive(false)
         window?.touchBar = nil
         onPreviewApp?(nil)
     }
 
     func resumePreviewIfNeeded() {
+        lyricsPane.model.setActive(window?.toolbar?.selectedItemIdentifier == lyricsID && window?.isVisible == true)
         if showingApps { appsPane.refresh(); appsPane.beginPreview() }
+        if showingEnhancedBar { enhancedBarPane.beginPreview() }
     }
 
     func refreshAppsIfNeeded() {

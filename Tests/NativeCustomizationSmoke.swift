@@ -79,12 +79,34 @@ struct NativeCustomizationSmoke {
                 }
             }
         }
+        for layout in ComponentLayout.allCases {
+            for (index, pair) in [["menu", "keyboard"], ["keyboard", "menu"], ["menu", "phrases"],
+                                 ["phrases", "menu"], ["menu", "chatgpt.chats"], ["lyrics", "menu"]].enumerated() {
+                let provider = AppBar(app: LayoutApp.builtIn[0],
+                    menuButtons: .init(buttons: [.init(title: String(repeating: "Menu 指令 ", count: 50),
+                        fillWidth: .init(mode: .fixed, fixed: 850), menuCommand: .init(title: "Show Sidebar", parentPath: "View"))]),
+                    componentPresentations: ["menu": .init(layout: layout)], persistsLayout: false)
+                let bar = provider.bar
+                bar.customizationIdentifier = .init("\(domain).menu.\(layout).\(index)")
+                bar.defaultItemIdentifiers = [AppBar.itemID(pair[0])]
+                precondition(NativeCustomizationMinimum(bar.item(forIdentifier: AppBar.itemID("menu"))!).width <= 36)
+                let ids = NativeCustomizationDrop(bar, AppBar.itemID(pair[1]).rawValue, 590)
+                precondition(Set(ids) == Set(pair.map { AppBar.itemID($0).rawValue }), "Menu native insertion: \(ids)")
+                bar.defaultItemIdentifiers = ids.map { .init($0) }
+                let frames = NativeCustomizationFrames(bar).map(\.rectValue)
+                precondition(frames.count == 2 && abs(frames[0].width - (frames[1].width - 4)) <= 1.01)
+                precondition(abs(frames[1].minX - frames[0].maxX - 8) <= 1)
+            }
+        }
         for mode in ComponentLayout.allCases {
-            for (index, pair) in [["text", "phrases"], ["phrases", "text"], ["text", "chatgpt.chats"], ["keyboard", "text"]].enumerated() {
+            for (index, pair) in [["text", "phrases"], ["phrases", "text"], ["text", "chatgpt.chats"], ["keyboard", "text"],
+                    ["lyrics", "phrases"], ["phrases", "lyrics"], ["lyrics", "keyboard"], ["text", "lyrics"]].enumerated() {
                 let provider = AppBar(app: LayoutApp.builtIn[0],
                     componentPresentations: Dictionary(uniqueKeysWithValues: pair.map { ($0, ComponentPresentation(layout: mode, alignment: .right)) }),
                     textItems: [TextComponentItem(text: String(repeating: "宽文字", count: 80), style: .init(fontSize: 40, tracking: 3),
                         fillWidth: .init(mode: .hug))], persistsLayout: false)
+                provider.configureLyrics(.init(style: .init(fontSize: 40, tracking: 3, backgroundColor: "#363636")))
+                provider.configureLyricsDisplay(.init(text: String(repeating: "长歌词 Lyric ", count: 50), detail: "Fixture"))
                 let bar = provider.bar
                 bar.customizationIdentifier = .init("\(domain).text.\(mode).\(index)")
                 bar.defaultItemIdentifiers = [AppBar.itemID(pair[0])]

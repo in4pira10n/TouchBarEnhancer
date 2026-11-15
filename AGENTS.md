@@ -30,8 +30,9 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
 | Category | Current examples | Contract |
 | --- | --- | --- |
 | Fixed action/toggle | Sidebar, Terminal | Independent native Touch Bar items; removable and reorderable |
-| Adaptive component | Chat Shortcuts, Quick Phrases, Keyboard Shortcuts | Peer components, independently addable; share the same item renderer |
+| Adaptive component | Chat Shortcuts, Quick Phrases, Keyboard Shortcuts, Menu Commands | Peer components, independently addable; share the same item renderer |
 | Plain text | Text | Per-app text entries; adaptive region, optional background with 4-point content inset |
+| Lyrics | Lyrics | Centered current line from system Now Playing and cached online LRC; shares text rendering and adaptive sizing |
 | Layout space | Native flexible Space | Optional user-controlled space; do not silently add/remove it |
 
 - `ScrollingComponents.swift` is the source of truth: map adapter data to
@@ -50,7 +51,28 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   settings are per app. Each button stores its own title, SF Symbol/embedded
   image, optional background, recorded shortcut and description. Empty background
   restores standard gray; never color the component container.
-- All list components (Chat Shortcuts, Quick Phrases, Keyboard Shortcuts and Text)
+- Menu Commands is an independent per-app component (`menu`), also available in
+  Enhanced Bar. Reuse `KeyboardButton`, `KeyboardButtonsConfiguration`,
+  `KeyboardButtonsComponent` and `ShortcutCategoryEditor.Kind.menu`; only the
+  backend and command-specific inputs differ. Persist its list in `menuButtons`,
+  never mix it with keyboard buttons or automatically insert it into saved bars.
+  Optional `menuCommand` keeps old keyboard records compatible. Button title and
+  exact localized command title are independent. Optional parent path uses →;
+  an alternate exact title supports mutually exclusive Show/Hide commands.
+  `MenuCommands.swift` reads only menu accessibility trees on explicit selection
+  or tap, with depth/node/IPC/time bounds; no polling, app activation, key events
+  or clipboard writes. Match exact titles and full paths, reject ambiguous,
+  disabled, incomplete or unavailable results and recheck the same foreground
+  bundle ID/PID immediately before AXPress. Never retry a possibly executed press.
+  Choose Menu Command reads a running app without executing actions; Enhanced
+  Bar first lets the user choose an app to read, while execution still targets
+  the foreground app. Errors use existing nonactivating action feedback.
+  Menu buttons inherit ordinary plain-label typography, display overrides,
+  per-entry colors, Fill widths, 8-point item and 12-point component gaps.
+  `check-menu-commands.sh` uses injected menu/action effects; signed hardware
+  checks read real menus but never execute user commands. Include both native
+  insertion orders and stable-ID row reordering in the existing regression checks.
+- All list components (Chat Shortcuts, Quick Phrases, Keyboard Shortcuts, Text and Lyrics)
   use `ComponentPresentation` and `ShortcutScroller`. Scrolling mode supports
   left/center/right alignment of the whole list; overflow scrolls naturally. Fill
   mode uses per-item Relative / Fixed / Hug width policies, with 8-point gaps,
@@ -60,7 +82,7 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   out of canonical Auto Layout minimum-width measurement.
 - `SettingsStore.componentPresentations` stores layout/alignment per app and
   component, separately from content and icon/text mode. Missing preferences use
-  Scrolling/Left, except legacy Keyboard Shortcuts configurations retain their
+  Scrolling/Left (Lyrics defaults to Center), except legacy Keyboard Shortcuts configurations retain their
   saved layout/alignment. `ComponentPresentationControls` supplies the same native
   Settings UI everywhere. Fill hides the whole-list alignment option without
   discarding it; changing back to Scrolling restores it. Fixed one-button
@@ -122,7 +144,7 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   layout/alignment edits must preserve it. Compact Text can shrink below the
   normal 32-point viewport to a 1-point minimum. Its region and wrapper need high
   horizontal hugging (but low compression resistance) so AppKit does not retain
-  a wide empty slot around a narrow view. Only Text sets `requestedWidth`;
+  a wide empty slot around a narrow view. Text and Lyrics set `requestedWidth`;
   button label typography, padding and natural measurement stay unchanged.
   Both canonical native customization and the modal host reserve compact Text
   first, then share remaining width among normal adaptive peers, preserving
@@ -143,6 +165,18 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   color uses NSColorWell; text drawing uses NSTextField/NSAttributedString and
   paragraph attributes. Font-panel changes must still target the current editor.
   Retain face traits selected in the font panel unless explicitly overridden.
+- `TextStyleEditor` is the shared native style inspector for Text entries and
+  Lyrics. Bind it to the latest model through read/write closures; do not copy
+  typography controls into another component. Valid keystrokes save without
+  reloading its field editor. Font-panel changes target only the visible current
+  inspector, including while the floating font panel is key.
+  `LyricsComponentConfiguration.style` is optional for legacy decoding and is
+  independent per app (including Enhanced Bar). Missing style preserves centered,
+  tail-truncated, white native text with no background. Each Default restores
+  only its property; Lyrics alignment/overflow restore Center/Truncate Tail.
+  Use the configured style on every lyric/status render, retain Fill/region width
+  settings during edits, and let shared Text measurement recompute Hug. Styling
+  must never restart media observation/search or persist live lyric content.
 - Text alignment is within an entry's cell; component alignment positions the
   whole list in Scrolling mode. Keep these separate. The 30-point hardware height
   remains fixed; oversized typography can be clipped. Reject nonfinite/out-of-range
@@ -150,6 +184,62 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
 - Basic text styling stays compact; advanced typography is independently
   collapsible. Text content is edited in the native list and supports stable-ID
   reordering. Empty lists remain empty after relaunch.
+- Lyrics reuses `TextComponent` and the same shared presentation controls: default
+  Scrolling/Center, clear background and white native text. Region Auto/Fixed/Hug
+  works in both layouts; line Relative/Fixed/Hug works only in Fill. Keep its
+  stable `lyrics` identifier and independent per-app preferences. Do not insert
+  Lyrics into existing app layouts automatically. `LyricsBackend.swift` owns
+  independent NetEase, QQ Music and LRCLIB searches, LRC parsing, matching, cache
+  and current-line timing. No LyricsX UI or LyricsKit dependency is imported.
+  Search uses song/artist, checks available duration/album and rejects mismatches;
+  no account, cookie or API key. Ephemeral HTTPS requests send song metadata only
+  while Lyrics is in the actually presented app/shared bar or active Settings
+  preview. Hide/removal, sleep and quit cancel requests, observers and deadlines.
+  Never search merely for a customization palette or offscreen view.
+  Cache matching timed results for 30 days and confirmed misses for one hour in
+  the app's Caches/Lyrics-v1 folder, at most 200 entries. Outages are not misses.
+  Bound/validate cache content and preserve unrelated files during pruning.
+  `LyricsSettings.swift` owns Settings → Lyrics. Source rows support native
+  stable-identity drag reordering; priority and the default-on fuzzy preference
+  persist in `SettingsStore.lyricsSearch` and reload visible lyrics immediately.
+  Try exact title/artist matches across the ordered sources before a fuzzy pass.
+  Fuzzy matching permits artist aliases, title annotations and small title edits,
+  while retaining available duration and live/remix/instrumental version checks.
+  Changes invalidate automatic cache by configuration, never manual choices.
+  Explicit search allows an edited title and optional artist, returns candidates
+  with provider identity, and loads a timed preview only after selection. Use
+  Lyrics saves the chosen timeline for the target song captured when Search was
+  pressed; subsequent player changes must not move this target. Show that target
+  next to the apply action. Store manual choices in Lyrics-v1/Selections, outside
+  automatic expiry/pruning; Restore Automatic removes only the target selection
+  and automatic entry. Never let an older automatic request overwrite a manual
+  choice. Typing and source reordering do not themselves run manual searches.
+  Observe metadata only while the Lyrics pane is visible, without polling or
+  changing playback. Cancel search/preview work on replacement and pane close;
+  ignore late callbacks, retain the native field editor and preview selection.
+  MediaRemote reads normalized metadata/elapsed/timestamp/rate from the bridge
+  on start and metadata/seek/playing/source notifications, never via polling.
+  Locally extrapolate playback time and schedule one one-shot deadline for the
+  next lyric line. Pause cancels it; seek/resume re-anchor. Retain a known song's
+  missing optional metadata/position in incomplete snapshots, but never carry
+  an anchor across different tracks/sources. Explicit playing/pause event values
+  override a stale read for that event. Reject cancelled/late reads and searches.
+  Keep local line changes out of UserDefaults and bar reconstruction. Instrumental,
+  unavailable lyrics/position, search and idle states use honest English labels.
+- Lyrics has its own full-region `LyricsInteractionView` above the shared text
+  scroller; it must not add an intrinsic minimum or change Text/button rendering.
+  Direct touches are claimed on contact: release with at most 8 points of jitter
+  opens Settings → Lyrics; a horizontal displacement of at least 20 points seeks
+  once (+5 seconds right, −5 left). Swipes never open search, including a swipe
+  that returns to its origin. Cancel multi-touch, vertical exits, detach/hide and
+  track-detail changes; ordinary line updates retain the gesture. Keep local
+  mouse fallback and accessibility press, with no global input monitor/timer.
+  Search navigation shows Settings only after an explicit user tap. Seeking uses
+  a fresh bounded Now Playing read and availability-guarded MediaRemote elapsed
+  time dispatch, clamps to zero/known duration, and rejects stale/changed media.
+  It never sends previous/next-track commands, resumes playback, or polls. The
+  active player decides whether a dispatched seek is supported. Gesture/backend
+  fixtures inject actions; never alter the user's media to test these features.
 
 ## Dimensions and appearance (points, not screenshot pixels)
 
@@ -175,8 +265,8 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   center the entire chat list in the available bar. Measure and draw using the
   same font, image dimensions, padding and gap constants.
 - Button titles use plain `stringValue`, stay on one line and truncate at the
-  tail with an ellipsis when space is insufficient. Only Text uses attributed
-  strings. Explicitly reset font/color/alignment and disable wrapping when
+  tail with an ellipsis when space is insufficient. Only Text and the Lyrics
+  text renderer use attributed strings. Explicitly reset font/color/alignment and disable wrapping when
   recycling a Text entry into a button. Preserve the button label's original
   native cell metrics (usesSingleLineMode false, maximumNumberOfLines 0);
   truncation keeps it on one line. Use the same configuration for measurement
@@ -229,6 +319,19 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   excluded/unselected apps. The native-to-modal slide-in is a known unresolved
   system transition; do not claim it fixed based on a selector existing or a
   single still screenshot. Do not change system-wide animation preferences.
+- Control Strip's Show Enhanced Touch Bar action toggles a shared, independently
+  customizable bar in the same persistent modal host, retaining the system Strip.
+  `LayoutApp.enhancedBar` is a configuration namespace, never a real app or input
+  target. Its layout identifier is independent of app layouts; its initial layout
+  contains Lyrics. Settings → Enhanced Bar reuses the app component editors and
+  native customization. Each presentation owns its own views. Shared phrases and
+  keys resolve the actual foreground target at tap time, with the same PID and
+  Accessibility checks as app components. The explicit bar stays open across app
+  activation and temporarily overrides Auto/Native/Pause without changing their
+  preferences. Repeating any assigned Show Enhanced Touch Bar interaction closes
+  it and reapplies the current app policy; Hide, sleep and quit also dismiss it.
+  Settings previews retain priority while their window is active. This manual
+  visibility is session state and must not be restored on launch.
 - `ControlStripButton` is a separate, retained system-tray item with its own
   stable identifier, independent of AppBar/preview layouts. Its action toggles
   global pause by default and respects app policy on resume. The Control Strip
@@ -240,6 +343,27 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   successful registration and programmatic `performClick` do not prove visibility
   or physical touches. Keep ordinary settings/silent-launch fixtures from
   registering the production identifier; run the signed hardware fixture alone.
+  Set its `visibilityPriority` to AppKit's highest named priority (`.high`) before
+  registration, retaining it across hide/show. On this macOS this also changes
+  the item's underlying priority from 0 to 1000. This is a priority request, not
+  proof that macOS will never displace a third-party tray item. The user confirmed
+  that playback controls can still displace it. Private `priority` aliases the
+  same property; it is not a second system-tray priority override. Do not fight
+  system controls by polling/re-registering or changing system Strip preferences.
+  LyricsX comparison (2026-11-15): its pinned TouchBarHelper revision
+  `003d41193ac1c6ab9cc570a1923587298014bf1d` uses the same addSystemTrayItem /
+  DFRElementSetControlStripPresenceForIdentifier registration, with no extra
+  priority API. It associates modal presentation with its tray identifier and
+  removes/restores its entry when LyricsX becomes/resigns active. On this Mac,
+  the no-placement presentation overload forwards to placement 0. Signed A/B
+  captures show that supplying an identifier alone does not prevent a later
+  fixture tray entry from replacing the visible entry. This comparison used
+  two fixture entries in one process, not simulated Apple media ownership.
+  The user reported recovery after diagnostic relaunches, and a real capture
+  showed our button during playback; no production anti-displacement change
+  was made in this investigation. Do not claim a durable fix from that recovery.
+  Check the active automation's showsButton before diagnosing displacement:
+  a hidden Default with a shown Playing rule intentionally hides on pause.
 - `ControlStripSettings.swift` owns the persisted configuration, live native
   editor and action runner. Older preferences default to the original pause
   action/symbol. Invalid symbol edits must retain the last valid persisted icon.
@@ -381,6 +505,9 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   Keep the window's top edge when switching panes and remember its resized size
   per pane for the current session. App details scroll vertically and component
   tables scroll horizontally when column minimums no longer fit.
+  Remember the last selected pane without triggering bar/configuration updates.
+  Control Strip offers a contextual Customize Enhanced Bar… link only for the
+  corresponding action; it navigates within the existing settings window.
 - Edit simple per-item properties (title, shortcut and display override) directly
   in native table columns. Keep image/symbol, background, description and multiline
   phrase content in the selected-row inspector instead of repeating table fields.
@@ -403,10 +530,62 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
 
 ## Verification and previous pitfalls
 
+- `check-lyrics-backend.sh` uses isolated cache and injected network/player/time
+  to cover LRC variants, matching, invalid cache, outages, pause/seek/rate,
+  incomplete snapshots and stale requests. `--live` searches known public tracks.
+  `check-lyrics-media.sh --live` reads the actual system player and resolves its
+  current line without activating an app or changing playback. Notification
+  cancellation is tested alongside the existing Control Strip observer.
+  `check-lyrics-bar.sh` uses the same signed bundle, isolated layouts/preferences
+  and synthetic lyrics for external captures/live sizing checks; it restores
+  production silently. Real provider/metadata tests and synthetic geometry checks
+  are separate evidence; neither simulates a physical touch.
+  `check-lyrics-settings.sh` covers actual native source drop callbacks, immediate
+  preference reload, manual query/preview/application, fixed target during song
+  changes, cancelled/out-of-order work and an automatic/manual selection race.
+  It renders offscreen light/dark panes and never opens a window or changes media.
+  `check-lyrics-typography.sh` covers legacy style decoding, shared editor live
+  validation and field retention, individual defaults, per-app persistence,
+  style retention across lines and independent presentations, and Hug/inset
+  updates. `check-text-component.sh` protects the existing Text inspector after
+  shared-editor changes. Native drop fixtures include long, styled lyric lines.
+  `check-lyrics-interactions.sh` exercises real direct-touch recognizer callbacks,
+  swipe/tap exclusion, cancellation, mouse fallback, full-region hit area and
+  offscreen Lyrics pane routing. Backend seek cases cover fresh position, bounds,
+  pending swipe accumulation, unavailable transport, timeout and stale media.
+  Position reads can repeat the pre-seek snapshot. After accepted dispatch,
+  retain a local target for at most three seconds so repeated/opposite swipes
+  accumulate against it. Use it only for the exact unchanged elapsed/timestamp
+  snapshot of the same source/song. New position anchors win immediately; pause
+  freezes the target. Reconcile once after the final swipe, never poll. Cancel on
+  disable or track/source change. Dispatch acceptance is not player acknowledgement.
+  Hardware logs also show same-song/source snapshots with unavailable elapsed
+  position after the first seek, even while every later touch is recognized.
+  Display and seek must share `resolvingPlayback`: fill missing/negative/nonfinite
+  positions from the same media's known extrapolated timeline and retain its
+  missing album/duration. Partial reads do not cancel pending reconciliation;
+  complete changed positions remain authoritative. Never invent a position when
+  none is known, or borrow one across song/player changes. Keep this distinct
+  from the three-second workaround for a valid but unchanged old snapshot.
+  Bridge seeking sends the absolute-position command and propagates its Boolean
+  result; the void elapsed-time wrapper loses this result. Relative skip commands
+  are disabled by Music on this machine. Tests cover delayed/unchanged metadata,
+  rejection, external seeks, playing/paused bursts and bounded reconciliation.
+  Missing-position regression cases cover repeated seeks after nil/negative/NaN
+  snapshots, retained duration bounds, rejected dispatches and source/song isolation.
+  These mock effects do not prove physical finger input or player seek support.
 - Run `bash scripts/check-settings.sh` and a release build for relevant changes.
   For layout/customization changes, also run native customization regression
   checks. Cover actual AppKit insertion/drop handling in both orders, not only
   setting `defaultItemIdentifiers` to an already-combined list.
+- `check-enhanced-bar-settings.sh` covers action bindings for every interaction,
+  contextual navigation, remembered pane, Lyrics defaults, live layouts/widths
+  and independent persistence with offscreen native editors. The signed
+  `check-enhanced-bar-runtime.sh` uses isolated preferences and nonpersistent
+  layouts to check real tray dispatch, shared/native/app restoration, policy
+  re-evaluation, Pause/Hide/sleep, centered Lyrics and compact/equal peer geometry.
+  It never types, pastes, activates another app or changes media. External captures
+  verify appearance separately; programmatic taps do not prove physical touches.
 - `bash scripts/check-component-widths.sh` covers all four list categories,
   legacy Relative defaults, ratios, mixed Fixed/Hug/Relative, Fill-only controls,
   live edits, validation, resize, overflow, unchanged gaps and per-app persistence.

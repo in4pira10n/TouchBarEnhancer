@@ -28,10 +28,12 @@ final class QuickPhrasesComponent {
     let scroller = ShortcutScroller(label: "Quick Phrases")
     private var phrases: [QuickPhrase] = []
     var onError: ((String) -> Void)?
+    var onSelect: ((QuickPhrase) -> Void)?
 
     init(targetBundleID: String, phrases: [QuickPhrase]) {
         scroller.onSelect = { [weak self] index in
             guard let self, self.phrases.indices.contains(index) else { return }
+            if let onSelect = self.onSelect { onSelect(self.phrases[index]); return }
             if let error = QuickPhrasePaster.paste(self.phrases[index].text, into: targetBundleID) {
                 self.onError?(error)
             }

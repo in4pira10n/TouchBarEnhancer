@@ -70,9 +70,9 @@ struct TextComponentSmoke {
         host.endEditing(for: nil)
         for scrubber in scrubbers { precondition(label(scrubber).stringValue == "Live text") }
         let size = descendants(editor).compactMap { $0 as? NSTextField }.first { $0.accessibilityIdentifier() == "text.fontSize" }!
-        size.stringValue = "nan"; editor.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: size))
+        size.stringValue = "nan"; size.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: size))
         precondition(store.textComponents[app.bundleID]![0].style.fontSize == 18)
-        size.stringValue = "17"; editor.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: size))
+        size.stringValue = "17"; size.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: size))
         precondition(label(scrubbers[1]).font?.pointSize == 17 || (label(scrubbers[1]).attributedStringValue.attribute(.font, at: 0, effectiveRange: nil) as! NSFont).pointSize == 17)
         render(editor, name: "basic")
         descendants(editor).compactMap { $0 as? NSButton }.first { $0.title == "Advanced Typography" }!.performClick(nil)

@@ -26,6 +26,22 @@ BOOL TBSkipMedia(BOOL forward) {
     return function(forward ? 4 : 5, NULL);
 }
 
+static NSString *mediaPlaybackPositionKey(void) {
+    void *framework = mediaRemoteFramework();
+    NSString * __unsafe_unretained *key = framework ? (NSString * __unsafe_unretained *)dlsym(framework, "kMRMediaRemoteOptionPlaybackPosition") : NULL;
+    return key ? *key : nil;
+}
+BOOL TBMediaSeekIsAvailable(void) { return mediaCommandFunction() != NULL && mediaPlaybackPositionKey() != nil; }
+BOOL TBSeekMediaToTime(NSTimeInterval elapsed) {
+    TBSendMediaCommand function = mediaCommandFunction();
+    NSString *key = mediaPlaybackPositionKey();
+    if (!function || !key || !isfinite(elapsed) || elapsed < 0) return NO;
+    // The same absolute-position command used by MRMediaRemoteSetElapsedTime,
+    // but retain its dispatch result instead of the void wrapper's lost error.
+    // Relative skip commands are disabled by some players, including Music.
+    return function(24, (__bridge CFDictionaryRef)@{key: @(elapsed)});
+}
+
 void TBReadMediaPlaying(void (^completion)(NSNumber *)) {
     typedef void (*TBGetPlaying)(dispatch_queue_t, void (^)(Boolean));
     void *framework = mediaRemoteFramework();
@@ -96,6 +112,70 @@ id TBObserveMediaPlaying(void (^changed)(NSNumber *)) {
 void TBStopObservingMediaPlaying(id observation) {
     NSCAssert([NSThread isMainThread], @"Media observation must be stopped on the main thread");
     if ([observation isKindOfClass:[TBMediaPlayingObservation class]]) [observation invalidate];
+}
+
+static id nowPlayingValue(NSDictionary *info, const char *symbol) {
+    NSString * __unsafe_unretained *key = (NSString * __unsafe_unretained *)dlsym(mediaRemoteFramework(), symbol);
+    return key && *key ? info[*key] : nil;
+}
+
+void TBReadNowPlaying(void (^completion)(NSDictionary<NSString *, id> *)) {
+    typedef void (*TBGetInfo)(dispatch_queue_t, void (^)(CFDictionaryRef));
+    typedef void (*TBGetPlaying)(dispatch_queue_t, void (^)(Boolean));
+    typedef void (*TBGetPID)(dispatch_queue_t, void (^)(int));
+    void *framework = mediaRemoteFramework();
+    TBGetInfo getInfo = framework ? (TBGetInfo)dlsym(framework, "MRMediaRemoteGetNowPlayingInfo") : NULL;
+    TBGetPlaying getPlaying = framework ? (TBGetPlaying)dlsym(framework, "MRMediaRemoteGetNowPlayingApplicationIsPlaying") : NULL;
+    TBGetPID getPID = framework ? (TBGetPID)dlsym(framework, "MRMediaRemoteGetNowPlayingApplicationPID") : NULL;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!getInfo || !getPlaying) { completion(nil); return; }
+        dispatch_group_t group = dispatch_group_create();
+        __block NSDictionary *info;
+        __block BOOL playing = NO;
+        __block int pid = 0;
+        dispatch_group_enter(group);
+        getInfo(dispatch_get_main_queue(), ^(CFDictionaryRef value) {
+            info = [(__bridge NSDictionary *)value copy]; dispatch_group_leave(group);
+        });
+        dispatch_group_enter(group);
+        getPlaying(dispatch_get_main_queue(), ^(Boolean value) { playing = value; dispatch_group_leave(group); });
+        if (getPID) {
+            dispatch_group_enter(group);
+            getPID(dispatch_get_main_queue(), ^(int value) { pid = value; dispatch_group_leave(group); });
+        }
+        dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+            if (!info) { completion(nil); return; }
+            NSMutableDictionary *result = [NSMutableDictionary dictionary];
+            const char *symbols[] = {"kMRMediaRemoteNowPlayingInfoTitle", "kMRMediaRemoteNowPlayingInfoArtist",
+                "kMRMediaRemoteNowPlayingInfoAlbum", "kMRMediaRemoteNowPlayingInfoDuration",
+                "kMRMediaRemoteNowPlayingInfoElapsedTime", "kMRMediaRemoteNowPlayingInfoTimestamp",
+                "kMRMediaRemoteNowPlayingInfoPlaybackRate"};
+            NSArray *keys = @[@"title", @"artist", @"album", @"duration", @"elapsed", @"timestamp", @"rate"];
+            for (NSUInteger i = 0; i < keys.count; i++) {
+                id value = nowPlayingValue(info, symbols[i]);
+                if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]] || [value isKindOfClass:[NSDate class]]) {
+                    result[keys[i]] = value;
+                }
+            }
+            result[@"playing"] = @(playing);
+            if (pid > 0) result[@"source"] = [NSRunningApplication runningApplicationWithProcessIdentifier:pid].bundleIdentifier ?: @"";
+            completion(result);
+        });
+    });
+}
+
+id TBObserveNowPlaying(void (^changed)(NSNumber *)) {
+    TBMediaPlayingObservation *observation = TBObserveMediaPlaying(changed);
+    if (!observation) return nil;
+    NSString * __unsafe_unretained *name = (NSString * __unsafe_unretained *)dlsym(mediaRemoteFramework(), "kMRMediaRemoteNowPlayingInfoDidChangeNotification");
+    if (!name || !*name) { [observation invalidate]; return nil; }
+    __weak TBMediaPlayingObservation *weakObservation = observation;
+    id token = [[NSNotificationCenter defaultCenter] addObserverForName:*name object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        TBMediaPlayingObservation *owner = weakObservation;
+        if (owner.changed) owner.changed(nil);
+    }];
+    [observation.observers addObject:token];
+    return observation;
 }
 
 typedef void (*TBSetControlStripPresence)(NSString *, BOOL);

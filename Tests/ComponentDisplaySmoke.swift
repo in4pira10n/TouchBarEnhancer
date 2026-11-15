@@ -137,6 +137,7 @@ struct ComponentDisplaySmoke {
             case .chats: restored.chatShortcuts[0].displayModeOverride
             case .phrases: restored.quickPhrasesByApp[app.bundleID]![0].displayModeOverride
             case .keyboard: restored.keyboardButtons[app.bundleID]!.buttons[0].displayModeOverride
+            case .menu: restored.menuButtons[app.bundleID]!.buttons[0].displayModeOverride
             }
             precondition(savedOverride == .iconAndText)
             let fresh = AppBar(app: app, shortcuts: restored.chatShortcuts, phrases: restored.quickPhrasesByApp[app.bundleID]!,

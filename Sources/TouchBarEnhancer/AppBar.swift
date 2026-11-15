@@ -1,6 +1,6 @@
 import AppKit
 
-/// Only Text can request a compact region; other adaptive components share the remainder.
+/// Text and Lyrics can request a compact region; adaptive peers share the remainder.
 @MainActor
 private enum ComponentRegionSizing {
     static func constraints(_ regions: [ScrollingComponentRegion], available: CGFloat,
@@ -114,6 +114,11 @@ struct LayoutApp: Codable, Equatable {
     var bundleID: String
     var name: String
 
+    // A configuration namespace, never an input target or an Applications rule.
+    static let enhancedBar = LayoutApp(bundleID: "local.starfruit.TouchBarEnhancer.enhancedBar", name: "Enhanced Bar")
+    static let enhancedBarSymbol = "command"
+    var isEnhancedBar: Bool { bundleID == Self.enhancedBar.bundleID }
+
     static var chatGPTBundleID: String {
         Bundle(url: URL(fileURLWithPath: "/Applications/ChatGPT.app"))?.bundleIdentifier ?? "com.openai.chat"
     }
@@ -131,8 +136,10 @@ struct LayoutApp: Codable, Equatable {
 final class AppBar: NSObject, NSTouchBarDelegate {
     static let componentDescriptions = [
         ("Keyboard Shortcuts", "Custom shortcut buttons, scrolling or equal width."),
+        ("Menu Commands", "Buttons that run exact menu commands through Accessibility."),
         ("Quick Phrases", "Scrollable phrases that paste into the focused input field."),
         ("Text", "Plain text with system typography and optional styling."),
+        ("Lyrics", "Current lyric line from online search and local cache."),
         ("Space", "Keep controls separated as space changes.")
     ]
 
@@ -157,9 +164,20 @@ final class AppBar: NSObject, NSTouchBarDelegate {
     private var shortcuts: [ChatShortcut]
     private var phrases: [QuickPhrase]
     private var keyboardConfiguration: KeyboardButtonsConfiguration
+    private var menuConfiguration: KeyboardButtonsConfiguration
     private var componentDisplayModes: [String: ComponentDisplayMode]
     private var componentPresentations: [String: ComponentPresentation]
     private var textItems: [TextComponentItem]
+    private var lyricsConfiguration: LyricsComponentConfiguration
+    private let lyricsComponents = NSMapTable<NSTouchBar, LyricsComponent>(keyOptions: .weakMemory, valueOptions: .strongMemory)
+    private var activeLyricsComponents: [LyricsComponent] {
+        lyricsComponents.objectEnumerator()?.allObjects as? [LyricsComponent] ?? []
+    }
+    var onActionError: ((String) -> Void)?
+    var onLyricsSearch: (() -> Void)?
+    var onLyricsSeek: ((TimeInterval) -> Void)?
+    var onLayoutChange: (() -> Void)?
+    private var lyricsDisplay = LyricsDisplay()
     private let textComponents = NSMapTable<NSTouchBar, TextComponent>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private var activeTextComponents: [TextComponent] {
         textComponents.objectEnumerator()?.allObjects as? [TextComponent] ?? []
@@ -167,6 +185,10 @@ final class AppBar: NSObject, NSTouchBarDelegate {
     private let keyboardComponents = NSMapTable<NSTouchBar, KeyboardButtonsComponent>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private var activeKeyboardComponents: [KeyboardButtonsComponent] {
         keyboardComponents.objectEnumerator()?.allObjects as? [KeyboardButtonsComponent] ?? []
+    }
+    private let menuComponents = NSMapTable<NSTouchBar, KeyboardButtonsComponent>(keyOptions: .weakMemory, valueOptions: .strongMemory)
+    private var activeMenuComponents: [KeyboardButtonsComponent] {
+        menuComponents.objectEnumerator()?.allObjects as? [KeyboardButtonsComponent] ?? []
     }
     private let phraseComponents = NSMapTable<NSTouchBar, QuickPhrasesComponent>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private var activePhraseComponents: [QuickPhrasesComponent] {
@@ -179,36 +201,43 @@ final class AppBar: NSObject, NSTouchBarDelegate {
 
     init(app: LayoutApp, chatGPTControlsEnabled: Bool = true, shortcuts: [ChatShortcut] = ChatShortcut.initial,
          phrases: [QuickPhrase] = [], keyboardButtons: KeyboardButtonsConfiguration = .init(),
+         menuButtons: KeyboardButtonsConfiguration = .init(),
          componentDisplayModes: [String: ComponentDisplayMode] = [:],
          componentPresentations: [String: ComponentPresentation] = [:],
-         textItems: [TextComponentItem] = TextComponentItem.initial, persistsLayout: Bool = true) {
+         textItems: [TextComponentItem] = TextComponentItem.initial,
+         lyrics: LyricsComponentConfiguration = .init(), persistsLayout: Bool = true) {
         self.app = app
         self.shortcuts = shortcuts
         self.phrases = phrases
         self.keyboardConfiguration = keyboardButtons
+        self.menuConfiguration = menuButtons
         self.componentDisplayModes = componentDisplayModes
         self.componentPresentations = componentPresentations
         self.textItems = textItems
+        self.lyricsConfiguration = lyrics
         usesChatGPTControls = app.isChatGPT && chatGPTControlsEnabled
         chatGPT = app.isChatGPT && chatGPTControlsEnabled ? ChatGPTAdapter(bundleID: app.bundleID) : nil
         super.init()
         bar.delegate = self
         // Keep the original generic layout intact when opting into the dedicated adapter.
-        bar.customizationIdentifier = persistsLayout ? .init(usesChatGPTControls
+        bar.customizationIdentifier = persistsLayout ? .init(app.isEnhancedBar
+            ? "local.starfruit.TouchBarEnhancer.layout.enhanced.v1"
+            : usesChatGPTControls
             ? "local.starfruit.TouchBarEnhancer.layout.chatgpt.v3.\(app.bundleID)"
             : "local.starfruit.TouchBarEnhancer.layout.v1.\(app.bundleID)") : nil
         // Normal app controls don't need a replacement Escape slot. The modal
         // host handles its own close-button replacement separately.
         bar.escapeKeyReplacementItemIdentifier = nil
         bar.defaultItemIdentifiers = [Self.itemID("phrases"), .flexibleSpace]
-        bar.customizationAllowedItemIdentifiers = [Self.itemID("phrases"), Self.itemID("keyboard"), Self.itemID("text"), .flexibleSpace]
+        bar.customizationAllowedItemIdentifiers = [Self.itemID("phrases"), Self.itemID("keyboard"), Self.itemID("menu"), Self.itemID("text"), Self.itemID("lyrics"), .flexibleSpace]
+        if app.isEnhancedBar { bar.defaultItemIdentifiers = [Self.itemID("lyrics")] }
         if usesChatGPTControls {
             bar.escapeKeyReplacementItemIdentifier = nil
             bar.defaultItemIdentifiers = [Self.itemID("chatgpt.sidebar"), Self.itemID("chatgpt.chats"), Self.itemID("chatgpt.terminal")]
-            bar.customizationAllowedItemIdentifiers = bar.defaultItemIdentifiers + [Self.itemID("phrases"), Self.itemID("keyboard"), Self.itemID("text"), .flexibleSpace]
+            bar.customizationAllowedItemIdentifiers = bar.defaultItemIdentifiers + [Self.itemID("phrases"), Self.itemID("keyboard"), Self.itemID("menu"), Self.itemID("text"), Self.itemID("lyrics"), .flexibleSpace]
         }
         layoutObservation = bar.observe(\.itemIdentifiers, options: [.new]) { [weak self] _, _ in
-            MainActor.assumeIsolated { self?.refreshPreviewSpacing() }
+            MainActor.assumeIsolated { self?.refreshPreviewSpacing(); self?.onLayoutChange?() }
         }
     }
 
@@ -218,6 +247,43 @@ final class AppBar: NSObject, NSTouchBarDelegate {
 
     func touchBar(_ touchBar: NSTouchBar, makeItemForIdentifier identifier: NSTouchBarItem.Identifier) -> NSTouchBarItem? {
         let item = NSCustomTouchBarItem(identifier: identifier)
+        if identifier == Self.itemID("menu") {
+            let component: KeyboardButtonsComponent
+            if let existing = menuComponents.object(forKey: touchBar) { component = existing }
+            else {
+                component = KeyboardButtonsComponent(targetBundleID: app.bundleID,
+                    configuration: menuConfiguration, usesMenuCommands: true)
+                if app.isEnhancedBar {
+                    component.onSelect = { [weak self] button in
+                        self?.performInForeground { MenuCommandSender.send(button.menuCommand, to: $0) }
+                    }
+                }
+                component.scroller.displayMode = componentDisplayModes["menu"] ?? .iconAndText
+                component.scroller.configurePresentation(presentation(for: "menu"))
+                component.onError = { [weak self] error in self?.onActionError?(error) }
+                menuComponents.setObject(component, forKey: touchBar)
+            }
+            item.customizationLabel = "Menu Commands"
+            component.region.preferredWidth = scrollingPreferredWidth
+            item.view = wrapped(component.region, identifier: identifier, in: touchBar)
+            return item
+        }
+        if identifier == Self.itemID("lyrics") {
+            let component: LyricsComponent
+            if let existing = lyricsComponents.object(forKey: touchBar) { component = existing }
+            else {
+                component = LyricsComponent(configuration: lyricsConfiguration)
+                component.onSearch = { [weak self] in self?.onLyricsSearch?() }
+                component.onSeek = { [weak self] in self?.onLyricsSeek?($0) }
+                component.configureDisplay(lyricsDisplay)
+                component.configurePresentation(presentation(for: "lyrics"))
+                lyricsComponents.setObject(component, forKey: touchBar)
+            }
+            item.customizationLabel = "Lyrics"
+            component.scroller.scrollRegion.preferredWidth = scrollingPreferredWidth
+            item.view = wrapped(component.scroller.scrollRegion, identifier: identifier, in: touchBar)
+            return item
+        }
         if identifier == Self.itemID("text") {
             let component: TextComponent
             if let existing = textComponents.object(forKey: touchBar) { component = existing }
@@ -236,6 +302,11 @@ final class AppBar: NSObject, NSTouchBarDelegate {
             if let existing = keyboardComponents.object(forKey: touchBar) { component = existing }
             else {
                 component = KeyboardButtonsComponent(targetBundleID: app.bundleID, configuration: keyboardConfiguration)
+                if app.isEnhancedBar {
+                    component.onSelect = { [weak self] button in
+                        self?.performInForeground { KeyboardShortcutSender.send(button.shortcut, to: $0) }
+                    }
+                }
                 component.scroller.displayMode = componentDisplayModes["keyboard"] ?? .iconAndText
                 component.scroller.configurePresentation(presentation(for: "keyboard"))
                 component.onError = { error in
@@ -254,6 +325,11 @@ final class AppBar: NSObject, NSTouchBarDelegate {
             if let existing = phraseComponents.object(forKey: touchBar) { component = existing }
             else {
                 component = QuickPhrasesComponent(targetBundleID: app.bundleID, phrases: phrases)
+                if app.isEnhancedBar {
+                    component.onSelect = { [weak self] phrase in
+                        self?.performInForeground { QuickPhrasePaster.paste(phrase.text, into: $0) }
+                    }
+                }
                 component.scroller.displayMode = componentDisplayModes["phrases"] ?? .iconAndText
                 component.scroller.configurePresentation(presentation(for: "phrases"))
                 component.onError = { error in
@@ -344,7 +420,7 @@ final class AppBar: NSObject, NSTouchBarDelegate {
     }
 
     private var scrollingPreferredWidth: CGFloat {
-        let scrollingIDs = [Self.itemID("phrases"), Self.itemID("chatgpt.chats"), Self.itemID("keyboard"), Self.itemID("text")]
+        let scrollingIDs = [Self.itemID("phrases"), Self.itemID("chatgpt.chats"), Self.itemID("keyboard"), Self.itemID("menu"), Self.itemID("text"), Self.itemID("lyrics")]
         let count = max(1, bar.itemIdentifiers.filter { scrollingIDs.contains($0) }.count)
         let boundaries = max(0, bar.itemIdentifiers.filter { $0 != .flexibleSpace }.count - 1)
         let width = max(ShortcutScroller.minimumWidth,
@@ -353,7 +429,9 @@ final class AppBar: NSObject, NSTouchBarDelegate {
         activeChatStrips.forEach { $0.scrollRegion.preferredWidth = width }
         activePhraseComponents.forEach { $0.scroller.scrollRegion.preferredWidth = width }
         activeKeyboardComponents.forEach { $0.region.preferredWidth = width }
+        activeMenuComponents.forEach { $0.region.preferredWidth = width }
         activeTextComponents.forEach { $0.scroller.scrollRegion.preferredWidth = width }
+        activeLyricsComponents.forEach { $0.scroller.scrollRegion.preferredWidth = width }
         return width
     }
 
@@ -387,17 +465,26 @@ final class AppBar: NSObject, NSTouchBarDelegate {
         activeKeyboardComponents.forEach { $0.scroller.configurePresentation(presentation(for: "keyboard")) }
     }
 
+    func configureMenuButtons(_ configuration: KeyboardButtonsConfiguration) {
+        guard menuConfiguration != configuration else { return }
+        menuConfiguration = configuration
+        activeMenuComponents.forEach { $0.configure(configuration); $0.scroller.configurePresentation(presentation(for: "menu")) }
+    }
+
     func configureComponentDisplayModes(_ modes: [String: ComponentDisplayMode]) {
         guard componentDisplayModes != modes else { return }
         componentDisplayModes = modes
         activeChatStrips.forEach { $0.scroller.displayMode = modes["chatgpt.chats"] ?? .iconAndText }
         activePhraseComponents.forEach { $0.scroller.displayMode = modes["phrases"] ?? .iconAndText }
         activeKeyboardComponents.forEach { $0.scroller.displayMode = modes["keyboard"] ?? .iconAndText }
+        activeMenuComponents.forEach { $0.scroller.displayMode = modes["menu"] ?? .iconAndText }
     }
 
     private func presentation(for key: String) -> ComponentPresentation {
-        componentPresentations[key] ?? (key == "keyboard"
-            ? ComponentPresentation(layout: keyboardConfiguration.layout, alignment: keyboardConfiguration.alignment) : .init())
+        if let saved = componentPresentations[key] { return saved }
+        if key == "keyboard" { return .init(layout: keyboardConfiguration.layout, alignment: keyboardConfiguration.alignment) }
+        if key == "menu" { return .init(layout: menuConfiguration.layout, alignment: menuConfiguration.alignment) }
+        return .init(alignment: key == "lyrics" ? .center : .left)
     }
 
     func configureComponentPresentations(_ values: [String: ComponentPresentation]) {
@@ -406,13 +493,36 @@ final class AppBar: NSObject, NSTouchBarDelegate {
         activeChatStrips.forEach { $0.scroller.configurePresentation(presentation(for: "chatgpt.chats")) }
         activePhraseComponents.forEach { $0.scroller.configurePresentation(presentation(for: "phrases")) }
         activeKeyboardComponents.forEach { $0.scroller.configurePresentation(presentation(for: "keyboard")) }
+        activeMenuComponents.forEach { $0.scroller.configurePresentation(presentation(for: "menu")) }
         activeTextComponents.forEach { $0.configurePresentation(presentation(for: "text")) }
+        activeLyricsComponents.forEach { $0.configurePresentation(presentation(for: "lyrics")) }
     }
 
     func configureText(_ items: [TextComponentItem]) {
         guard textItems != items else { return }
         textItems = items
         activeTextComponents.forEach { $0.configure(items) }
+    }
+
+    func configureLyrics(_ configuration: LyricsComponentConfiguration) {
+        guard lyricsConfiguration != configuration else { return }
+        lyricsConfiguration = configuration
+        activeLyricsComponents.forEach { $0.configure(configuration) }
+    }
+
+    func configureLyricsDisplay(_ display: LyricsDisplay) {
+        guard lyricsDisplay != display else { return }
+        lyricsDisplay = display
+        activeLyricsComponents.forEach { $0.configureDisplay(display) }
+    }
+
+    private func performInForeground(_ action: (String) -> String?) {
+        guard let target = NSWorkspace.shared.frontmostApplication,
+              target.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              let bundleID = target.bundleIdentifier else {
+            onActionError?("Focus an app before using the Enhanced Bar."); return
+        }
+        if let error = action(bundleID) { onActionError?(error) }
     }
 
 }

@@ -20,11 +20,13 @@ final class AppsPane: NSView, NSTableViewDelegate, NSTableViewDataSource {
     private(set) var selectedApp: LayoutApp?
     private var apps: [LayoutApp] = []
     private var hasLoadedApps = false
+    private let standaloneApp: LayoutApp?
     var onSelect: ((LayoutApp?) -> Void)?
     var onCustomize: ((LayoutApp) -> Void)?
 
-    init(store: SettingsStore, chatGPTConnectionReader: (() -> ChatGPTAdapter.Snapshot)? = nil) {
+    init(store: SettingsStore, chatGPTConnectionReader: (() -> ChatGPTAdapter.Snapshot)? = nil, standaloneApp: LayoutApp? = nil) {
         self.store = store
+        self.standaloneApp = standaloneApp
         self.chatGPTConnectionReader = chatGPTConnectionReader
         super.init(frame: .zero)
         let column = NSTableColumn(identifier: .init("app"))
@@ -46,6 +48,7 @@ final class AppsPane: NSView, NSTableViewDelegate, NSTableViewDataSource {
         left.alignment = .leading
         left.spacing = 8
         left.translatesAutoresizingMaskIntoConstraints = false
+        left.isHidden = standaloneApp != nil
         add.setAccessibilityIdentifier("addLayoutApp")
         addSubview(left)
         detail.orientation = .vertical
@@ -67,7 +70,9 @@ final class AppsPane: NSView, NSTableViewDelegate, NSTableViewDataSource {
             left.widthAnchor.constraint(equalToConstant: 180),
             scroll.widthAnchor.constraint(equalTo: left.widthAnchor),
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 280),
-            detailScroll.leadingAnchor.constraint(equalTo: left.trailingAnchor, constant: 24),
+            standaloneApp == nil
+                ? detailScroll.leadingAnchor.constraint(equalTo: left.trailingAnchor, constant: 24)
+                : detailScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             detailScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             detailScroll.topAnchor.constraint(equalTo: left.topAnchor),
             detailScroll.bottomAnchor.constraint(equalTo: left.bottomAnchor),
@@ -85,6 +90,13 @@ final class AppsPane: NSView, NSTableViewDelegate, NSTableViewDataSource {
         header.spacing = 10
         header.alignment = .centerY
         detail.addArrangedSubview(header)
+        if standaloneApp != nil {
+            let description = NSTextField(wrappingLabelWithString: "A shared bar for any app. Assign Show Enhanced Touch Bar to a Control Strip interaction; repeat it to restore the app’s bar.")
+            description.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            description.textColor = .secondaryLabelColor
+            detail.addArrangedSubview(description)
+            description.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true
+        }
         let customize = NSButton(title: "Customize Touch Bar…", target: self, action: #selector(customize))
         customize.bezelStyle = .rounded
         customize.setAccessibilityIdentifier("customizeAppBar")
@@ -110,7 +122,7 @@ final class AppsPane: NSView, NSTableViewDelegate, NSTableViewDataSource {
 
     func refresh() {
         let selectedID = selectedApp?.bundleID
-        let candidates = store.configurableApps
+        let candidates = standaloneApp.map { [$0] } ?? store.configurableApps
         addButton.isHidden = store.autoPolicy == .selection
         guard !hasLoadedApps || candidates != apps else { return }
         hasLoadedApps = true
@@ -177,14 +189,21 @@ final class AppsPane: NSView, NSTableViewDelegate, NSTableViewDataSource {
             components.addArrangedSubview(keyboard)
             keyboard.widthAnchor.constraint(equalTo: components.widthAnchor).isActive = true
         }
+        let menu = ShortcutCategoryEditor(store: store, kind: .menu, appBundleID: app.bundleID)
+        components.addArrangedSubview(menu)
+        menu.widthAnchor.constraint(equalTo: components.widthAnchor).isActive = true
         let text = TextComponentEditor(store: store, appBundleID: app.bundleID)
         components.addArrangedSubview(text)
         text.widthAnchor.constraint(equalTo: components.widthAnchor).isActive = true
+        let lyrics = LyricsComponentEditor(store: store, appBundleID: app.bundleID)
+        components.addArrangedSubview(lyrics)
+        lyrics.widthAnchor.constraint(equalTo: components.widthAnchor).isActive = true
         detailScroll.contentView.scroll(to: .zero)
         onSelect?(app)
     }
 
     private func icon(for app: LayoutApp) -> NSImage? {
+        if app.isEnhancedBar { return NSImage(systemSymbolName: LayoutApp.enhancedBarSymbol, accessibilityDescription: app.name) }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleID) else {
             return NSImage(systemSymbolName: "app", accessibilityDescription: nil)
         }

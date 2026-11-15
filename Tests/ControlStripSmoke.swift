@@ -11,8 +11,10 @@ struct ControlStripSmoke {
         checkDirectTouches()
         // Availability only: never skip the user's media while running checks.
         precondition(TBMediaSkipIsAvailable(), "System media transport API unavailable")
+        precondition(TBMediaSeekIsAvailable(), "System position transport API unavailable")
         precondition(TBControlStripIsAvailable(), "Control Strip API unavailable")
         let control = ControlStripButton()
+        precondition(control.item.visibilityPriority == .high)
         control.button.currentModifiers = { [] }
         precondition(!control.button.isBordered && (control.button.layer?.cornerRadius ?? 0) == 0)
         var count = 0
@@ -64,6 +66,9 @@ struct ControlStripSmoke {
                 precondition(control.button.accessibilityLabel() == "Resume TouchBarEnhancer")
                 control.update(enabled: false, paused: false)
                 precondition(!control.isRegistered)
+                control.update(enabled: true, paused: false)
+                precondition(control.isRegistered && control.item.visibilityPriority == .high)
+                control.update(enabled: false, paused: false)
                 control.remove() // Repeated removal is harmless.
                 precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground)
                 precondition(!app.windows.contains { $0.styleMask.contains(.titled) && $0.isVisible })

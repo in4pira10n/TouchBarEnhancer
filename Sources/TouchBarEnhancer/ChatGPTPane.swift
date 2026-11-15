@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import UniformTypeIdentifiers
 
 @MainActor
@@ -177,16 +178,17 @@ final class ChatGPTPane: NSStackView {
 @MainActor
 final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSTextViewDelegate {
     enum Kind {
-        case chats, phrases, keyboard
+        case chats, phrases, keyboard, menu
         var title: String {
-            switch self { case .chats: "Chat Shortcuts"; case .phrases: "Quick Phrases"; case .keyboard: "Keyboard Shortcuts" }
+            switch self { case .chats: "Chat Shortcuts"; case .phrases: "Quick Phrases"; case .keyboard: "Keyboard Shortcuts"; case .menu: "Menu Commands" }
         }
         var singular: String {
-            switch self { case .chats: "Chat"; case .phrases: "Phrase"; case .keyboard: "Button" }
+            switch self { case .chats: "Chat"; case .phrases: "Phrase"; case .keyboard, .menu: "Button" }
         }
         var componentKey: String {
-            switch self { case .chats: "chatgpt.chats"; case .phrases: "phrases"; case .keyboard: "keyboard" }
+            switch self { case .chats: "chatgpt.chats"; case .phrases: "phrases"; case .keyboard: "keyboard"; case .menu: "menu" }
         }
+        var isAction: Bool { self == .keyboard || self == .menu }
     }
     let kind: Kind
     private static let rowDragType = NSPasteboard.PasteboardType("local.starfruit.TouchBarEnhancer.shortcut-row")
@@ -197,8 +199,11 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         set { store.quickPhrasesByApp[appBundleID] = newValue }
     }
     private var keyboardConfiguration: KeyboardButtonsConfiguration {
-        get { store.keyboardButtons[appBundleID] ?? .init() }
-        set { store.keyboardButtons[appBundleID] = newValue }
+        get { (kind == .menu ? store.menuButtons[appBundleID] : store.keyboardButtons[appBundleID]) ?? .init() }
+        set {
+            if kind == .menu { store.menuButtons[appBundleID] = newValue }
+            else { store.keyboardButtons[appBundleID] = newValue }
+        }
     }
     private let disclosure = NSButton()
     private let body = NSStackView()
@@ -207,6 +212,9 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
     private let colorField = NSTextField()
     private let colorWell = NSColorWell()
     private let descriptionField = NSTextField()
+    private let menuPathField = NSTextField()
+    private let alternateMenuField = NSTextField()
+    private weak var menuPickerAnchor: NSButton?
     private let phraseText = NSTextView()
     private let error = NSTextField(wrappingLabelWithString: "")
     private let imageLabel = NSTextField(labelWithString: "")
@@ -219,14 +227,14 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         ComponentPresentationControls.labelWidth
     }
     private var count: Int {
-        switch kind { case .chats: store.chatShortcuts.count; case .phrases: phrases.count; case .keyboard: keyboardConfiguration.buttons.count }
+        switch kind { case .chats: store.chatShortcuts.count; case .phrases: phrases.count; case .keyboard, .menu: keyboardConfiguration.buttons.count }
     }
 
     init(store: SettingsStore, kind: Kind, appBundleID: String = LayoutApp.chatGPTBundleID) {
         self.store = store; self.kind = kind; self.appBundleID = appBundleID
         super.init(frame: .zero)
         orientation = .vertical; alignment = .leading; spacing = 8
-        setAccessibilityIdentifier(kind == .chats ? "chatShortcutsCategory" : (kind == .phrases ? "quickPhrasesCategory" : "keyboardShortcutsCategory"))
+        setAccessibilityIdentifier(kind == .chats ? "chatShortcutsCategory" : (kind == .phrases ? "quickPhrasesCategory" : (kind == .menu ? "menuCommandsCategory" : "keyboardShortcutsCategory")))
         disclosure.setButtonType(.pushOnPushOff)
         disclosure.bezelStyle = .disclosure
         disclosure.title = ""
@@ -248,8 +256,8 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         let column = NSTableColumn(identifier: .init("title")); column.title = "Title"; column.width = 180; column.minWidth = 100
         table.addTableColumn(column)
         if kind != .phrases {
-            let shortcut = NSTableColumn(identifier: .init("shortcut")); shortcut.title = "Shortcut"
-            shortcut.width = 110; shortcut.minWidth = 90
+            let shortcut = NSTableColumn(identifier: .init("shortcut")); shortcut.title = kind == .menu ? "Menu Command" : "Shortcut"
+            shortcut.width = kind == .menu ? 180 : 110; shortcut.minWidth = kind == .menu ? 130 : 90
             table.addTableColumn(shortcut)
         }
         let displayColumn = NSTableColumn(identifier: .init("display")); displayColumn.title = "Display"
@@ -279,10 +287,16 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 10
         body.addArrangedSubview(form)
         form.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
-        symbolField.placeholderString = kind == .chats ? "bubble.left" : (kind == .phrases ? "text.bubble" : "keyboard")
-        colorField.placeholderString = kind == .keyboard ? "Default" : "blue or #0088FF"
+        symbolField.placeholderString = kind == .chats ? "bubble.left" : (kind == .phrases ? "text.bubble" : (kind == .menu ? "menubar.rectangle" : "keyboard"))
+        colorField.placeholderString = kind.isAction ? "Default" : "blue or #0088FF"
         descriptionField.placeholderString = "Optional description"
-        for field in [symbolField, colorField, descriptionField] {
+        menuPathField.placeholderString = "View → Layout (optional)"
+        menuPathField.setAccessibilityIdentifier("menuParentPath")
+        menuPathField.toolTip = "Exact parent menu titles separated by →. Leave empty to search all app menus."
+        alternateMenuField.placeholderString = "Alternate command name (optional)"
+        alternateMenuField.setAccessibilityIdentifier("menuAlternateTitle")
+        alternateMenuField.toolTip = "For a command whose title changes, such as Show Sidebar / Hide Sidebar."
+        for field in [symbolField, colorField, descriptionField, menuPathField, alternateMenuField] {
             field.delegate = self
             field.setContentHuggingPriority(.defaultLow, for: .horizontal)
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -290,7 +304,7 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         colorWell.target = self; colorWell.action = #selector(pickColor)
         colorWell.widthAnchor.constraint(equalToConstant: 40).isActive = true
         let colors = NSStackView(views: [colorField, colorWell]); colors.spacing = 6; colors.alignment = .centerY
-        if kind == .keyboard {
+        if kind.isAction {
             colors.addArrangedSubview(NSButton(title: "Default", target: self, action: #selector(clearColor)))
         }
         var rows: [[NSView]] = [[NSTextField(labelWithString: "SF Symbol:"), symbolField]]
@@ -305,7 +319,15 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         imageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let images = NSStackView(views: [choose, clear, imageLabel]); images.spacing = 8; images.alignment = .centerY
         rows.append([NSTextField(labelWithString: "Image:"), images])
-        if kind == .keyboard { rows.append([NSTextField(labelWithString: "Description:"), descriptionField]) }
+        if kind.isAction { rows.append([NSTextField(labelWithString: "Description:"), descriptionField]) }
+        if kind == .menu {
+            let choose = NSButton(title: "Choose Menu Command…", target: self, action: #selector(chooseMenuCommand))
+            choose.toolTip = "Read menus from the running app without activating it or executing a command."
+            rows.append([NSTextField(labelWithString: "Menu path:"), menuPathField])
+            rows.append([NSTextField(labelWithString: "Alternate name:"), alternateMenuField])
+            let chooser = NSStackView(views: [choose, NSView()]); chooser.alignment = .centerY
+            rows.append([NSGridCell.emptyContentView, chooser])
+        }
         if kind == .phrases {
             phraseText.isRichText = false; phraseText.allowsUndo = true
             phraseText.font = .systemFont(ofSize: NSFont.systemFontSize)
@@ -354,7 +376,7 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         switch kind {
         case .chats: store.chatShortcuts[row]
         case .phrases: phrases[row].displayShortcut
-        case .keyboard: keyboardConfiguration.buttons[row].displayShortcut
+        case .keyboard, .menu: keyboardConfiguration.buttons[row].displayShortcut
         }
     }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -374,6 +396,12 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
             return popup
         }
         if tableColumn?.identifier.rawValue == "shortcut" {
+            if kind == .menu {
+                let field = ComponentInlineTextField(value: keyboardConfiguration.buttons[row].menuCommand?.title ?? "", placeholder: "Exact menu name")
+                field.setAccessibilityIdentifier("menuCommand.\(item.id)")
+                field.onEdit = { [weak self] value in self?.editInline(item.id, .menuTitle(value)) }
+                return field
+            }
             if kind == .chats {
                 let popup = ComponentInlinePopup(titles: (1...9).map { "⌃\($0)" }, selected: max(0, min(8, item.slot - 1)))
                 popup.onChange = { [weak self] index in self?.editInline(item.id, .slot(index + 1)) }
@@ -406,7 +434,7 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         return cell
     }
 
-    private enum InlineEdit { case title(String), display(ComponentDisplayMode?), slot(Int), key(KeyboardShortcut?), width(ComponentItemWidth) }
+    private enum InlineEdit { case title(String), display(ComponentDisplayMode?), slot(Int), key(KeyboardShortcut?), width(ComponentItemWidth), menuTitle(String) }
     private func editInline(_ id: UUID, _ edit: InlineEdit) {
         guard let row = (0..<count).first(where: { displayItem(at: $0).id == id }) else { return }
         var item = displayItem(at: row)
@@ -417,6 +445,11 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         case .display(let mode): item.displayModeOverride = mode
         case .slot(let slot): item.slot = slot
         case .key(let shortcut): keyboardConfiguration.buttons[row].shortcut = shortcut
+        case .menuTitle(let title):
+            var binding = keyboardConfiguration.buttons[row].menuCommand ?? .init()
+            binding.title = title
+            guard title.count <= 512 else { showError("Menu names must be at most 512 characters."); return }
+            keyboardConfiguration.buttons[row].menuCommand = binding
         case .width(let width): item.fillWidth = width
         }
         switch kind {
@@ -424,7 +457,7 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         case .phrases:
             phrases[row].name = item.name; phrases[row].displayModeOverride = item.displayModeOverride
             phrases[row].fillWidth = item.fillWidth
-        case .keyboard:
+        case .keyboard, .menu:
             keyboardConfiguration.buttons[row].title = item.name
             keyboardConfiguration.buttons[row].displayModeOverride = item.displayModeOverride
             keyboardConfiguration.buttons[row].fillWidth = item.fillWidth
@@ -488,11 +521,13 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         let item = displayItem(at: table.selectedRow)
         symbolField.stringValue = item.symbol
         colorField.stringValue = item.color
-        colorWell.color = ChatColor.resolve(item.color) ?? (kind == .keyboard ? ChatSideButton.normalBackground : .systemBlue)
+        colorWell.color = ChatColor.resolve(item.color) ?? (kind.isAction ? ChatSideButton.normalBackground : .systemBlue)
         if kind == .phrases { phraseText.string = phrases[table.selectedRow].text }
-        if kind == .keyboard {
+        if kind.isAction {
             let button = keyboardConfiguration.buttons[table.selectedRow]
             descriptionField.stringValue = button.description
+            menuPathField.stringValue = button.menuCommand?.parentPath ?? ""
+            alternateMenuField.stringValue = button.menuCommand?.alternateTitle ?? ""
         }
         imageData = item.imageData; imageLabel.stringValue = imageData == nil ? "" : "Embedded Image"
         imageLabel.isHidden = imageData == nil
@@ -506,7 +541,8 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         } else if kind == .phrases {
             phrases.append(QuickPhrase(name: "Phrase \(count + 1)", text: "Please explain this in more detail."))
         } else {
-            keyboardConfiguration.buttons.append(KeyboardButton(title: "Button \(count + 1)"))
+            keyboardConfiguration.buttons.append(KeyboardButton(title: "Button \(count + 1)",
+                symbol: kind == .menu ? "menubar.rectangle" : "keyboard", menuCommand: kind == .menu ? .init() : nil))
         }
         store.save(); table.reloadData()
         table.selectRowIndexes([count - 1], byExtendingSelection: false); loadSelection()
@@ -516,7 +552,7 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         switch kind {
         case .chats: store.chatShortcuts.remove(at: row)
         case .phrases: phrases.remove(at: row)
-        case .keyboard: keyboardConfiguration.buttons.remove(at: row)
+        case .keyboard, .menu: keyboardConfiguration.buttons.remove(at: row)
         }
         store.save(); table.reloadData()
         if count > 0 { table.selectRowIndexes([min(row, count - 1)], byExtendingSelection: false) }
@@ -544,7 +580,7 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
         }
         if kind != .phrases {
             let color = colorField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let resolved = color.isEmpty && kind == .keyboard ? ChatSideButton.normalBackground : ChatColor.resolve(color) else {
+            guard let resolved = color.isEmpty && kind.isAction ? ChatSideButton.normalBackground : ChatColor.resolve(color) else {
                 showError("Use a system color name or six-digit hex color."); return
             }
             colorWell.color = resolved; showError("")
@@ -559,6 +595,15 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
                 var item = keyboardConfiguration.buttons[row]
                 item.title = name; item.symbol = symbol; item.color = color; item.imageData = imageData
                 item.description = descriptionField.stringValue
+                if kind == .menu {
+                    var binding = item.menuCommand ?? .init()
+                    binding.parentPath = menuPathField.stringValue
+                    binding.alternateTitle = alternateMenuField.stringValue
+                    guard binding.parentPath.count <= 2048, binding.alternateTitle.count <= 512 else {
+                        showError("The menu path or alternate name is too long."); return
+                    }
+                    item.menuCommand = binding
+                }
                 item.displayModeOverride = displayOverride
                 guard item != keyboardConfiguration.buttons[row] else { return }
                 keyboardConfiguration.buttons[row] = item
@@ -576,6 +621,72 @@ final class ShortcutCategoryEditor: NSStackView, NSTableViewDataSource, NSTableV
     }
     @objc private func pickColor() { colorField.stringValue = ChatColor.hex(colorWell.color); applyEdits() }
     @objc private func clearColor() { colorField.stringValue = ""; applyEdits() }
+    @objc private func chooseMenuCommand(_ sender: NSButton) {
+        guard kind == .menu, (0..<count).contains(table.selectedRow) else { return }
+        guard AXIsProcessTrusted() else { showError("Allow TouchBarEnhancer in Accessibility first."); return }
+        if appBundleID == LayoutApp.enhancedBar.bundleID {
+            menuPickerAnchor = sender
+            let menu = NSMenu(); menu.autoenablesItems = false
+            for app in NSWorkspace.shared.runningApplications
+                .filter({ $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier })
+                .sorted(by: { ($0.localizedName ?? "") < ($1.localizedName ?? "") }) {
+                let item = NSMenuItem(title: app.localizedName ?? app.bundleIdentifier ?? "App", action: #selector(chooseMenuTarget(_:)), keyEquivalent: "")
+                item.target = self; item.representedObject = app
+                menu.addItem(item)
+            }
+            guard !menu.items.isEmpty else { showError("Open an app to read its menu commands."); return }
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+            return
+        }
+        guard let target = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == appBundleID }) else {
+            showError("Open the target app first, then choose a menu command."); return
+        }
+        presentMenuChoices(pid: target.processIdentifier, anchor: sender)
+    }
+    @objc private func chooseMenuTarget(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? NSRunningApplication, !target.isTerminated,
+              let anchor = menuPickerAnchor else { return }
+        // Wait until the app chooser's native tracking loop has unwound.
+        DispatchQueue.main.async { [weak self, weak anchor] in
+            guard let anchor else { return }
+            self?.presentMenuChoices(pid: target.processIdentifier, anchor: anchor)
+        }
+    }
+    private func presentMenuChoices(pid: pid_t, anchor: NSButton) {
+        guard kind == .menu, (0..<count).contains(table.selectedRow) else { return }
+        let path = MenuCommandBinding(parentPath: menuPathField.stringValue)
+        let snapshot = MenuCommandSender.snapshot(pid: pid, parentPath: path.parentPath.isEmpty ? nil : path.path)
+        guard snapshot.complete, snapshot.error == nil else {
+            showError(snapshot.error ?? "The app’s menus could not be fully read. Enter a name and path manually."); return
+        }
+        guard !snapshot.entries.isEmpty else { showError("No accessible menu commands were found."); return }
+        let id = displayItem(at: table.selectedRow).id
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for entry in snapshot.entries {
+            let item = NSMenuItem(title: entry.path.joined(separator: " → "), action: #selector(selectMenuCommand(_:)), keyEquivalent: "")
+            item.target = self
+            // Disabled app commands may still be configured for later use.
+            item.representedObject = MenuChoice(id: id, path: entry.path)
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+    }
+    private final class MenuChoice: NSObject {
+        let id: UUID
+        let path: [String]
+        init(id: UUID, path: [String]) { self.id = id; self.path = path }
+    }
+    @objc private func selectMenuCommand(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? MenuChoice,
+              let row = keyboardConfiguration.buttons.firstIndex(where: { $0.id == choice.id }),
+              let title = choice.path.last else { return }
+        keyboardConfiguration.buttons[row].menuCommand = .init(title: title,
+            parentPath: choice.path.dropLast().joined(separator: " → "))
+        store.save()
+        table.reloadData(forRowIndexes: [row], columnIndexes: [1])
+        if table.selectedRow == row { loadSelection() }
+    }
     @objc private func chooseImage() {
         guard let window else { return }
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.png, .jpeg, .tiff, .pdf]

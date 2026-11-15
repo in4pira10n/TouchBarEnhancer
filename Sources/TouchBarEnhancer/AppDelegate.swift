@@ -217,6 +217,7 @@ final class ControlStripButton: NSObject {
         button.contentTintColor = .white
         button.target = self; button.action = #selector(pressed)
         item.view = button
+        item.visibilityPriority = .high
         item.customizationLabel = "TouchBarEnhancer"
         update(enabled: false, paused: false)
     }
@@ -260,6 +261,7 @@ final class ControlStripButton: NSObject {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let settings: SettingsStore
+    private let persistsLayouts: Bool
     private var settingsWindow: SettingsWindowController?
     private var providers: [String: AppBar] = [:]
     private var presented: AppBar?
@@ -279,11 +281,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var effectiveControlStripConfiguration = ControlStripConfiguration()
     private var previewApp: LayoutApp?
     private var hiddenForCurrentApp = false
+    private(set) var enhancedBarVisible = false
     private var clockTimer: Timer?
+    private var suppliedLyricsController: LyricsController?
+    private lazy var lyricsRepository = LyricsRepository(preferences: settings.lyricsSearch)
+    private lazy var lyricsController = suppliedLyricsController ?? makeLyricsController()
+    private func makeLyricsController() -> LyricsController { LyricsController(search: { [weak self] track in
+        guard let self else { throw CancellationError() }
+        return try await self.lyricsRepository.search(track)
+    }, read: { completion in
+        TBReadNowPlaying { values in
+            let state = LyricsPlayback(nowPlaying: values)
+            MainActor.assumeIsolated { completion(state) }
+        }
+    }, observe: { changed in
+        guard let token = TBObserveNowPlaying({ value in MainActor.assumeIsolated { changed(value?.boolValue) } }) else { return nil }
+        return { TBStopObservingMediaPlaying(token) }
+    }, setElapsed: { TBSeekMediaToTime($0) }) }
     var enhancedAppBundleID: String? { presented?.app.bundleID }
 
-    init(settings: SettingsStore = SettingsStore()) {
+    init(settings: SettingsStore = SettingsStore(), persistsLayouts: Bool = true, lyricsController: LyricsController? = nil) {
         self.settings = settings
+        self.persistsLayouts = persistsLayouts
+        self.suppliedLyricsController = lyricsController
         super.init()
     }
 
@@ -293,6 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "Customize Touch Bar…", action: #selector(NSApplication.toggleTouchBarCustomizationPalette(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
         appMenu.addItem(withTitle: "Quit TouchBarEnhancer", action: #selector(quit), keyEquivalent: "q").target = self
         let root = NSMenuItem()
         root.submenu = appMenu
@@ -316,6 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addMenuItem("Quit TouchBarEnhancer", action: #selector(quit), to: menu)
         statusItem.menu = menu
         controlStripActions.skipMedia = { TBSkipMedia($0) }
+        controlStripActions.toggleEnhancedBar = { [weak self] in self?.toggleEnhancedBar() }
         controlStrip.onInteraction = { [weak self] interaction in
             guard let self else { return }
             self.statusItem.button?.toolTip = "TouchBarEnhancer"
@@ -331,6 +353,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSSound.beep()
         }
         controlStripAutomation.onChange = { [weak self] in self?.updateControlStrip() }
+        lyricsController.onChange = { [weak self] display in
+            self?.providers.values.forEach { $0.configureLyricsDisplay(display) }
+        }
+        lyricsRepository.onSelectionChange = { [weak self] _ in self?.lyricsController.reload() }
         configureControlStripAutomation()
 
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(frontAppChanged),
@@ -341,6 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didWakeNotification, object: nil)
         settings.onChange = { [weak self] in
             guard let self else { return }
+            if self.lyricsRepository.configure(self.settings.lyricsSearch) { self.lyricsController.reload() }
             self.configureControlStripAutomation()
             self.hiddenForCurrentApp = false
             self.settingsWindow?.refreshAppsIfNeeded()
@@ -385,17 +412,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             cached.configureChats(settings.chatShortcuts)
             cached.configurePhrases(settings.quickPhrasesByApp[app.bundleID] ?? [])
             cached.configureKeyboardButtons(settings.keyboardButtons[app.bundleID] ?? .init())
+            cached.configureMenuButtons(settings.menuButtons[app.bundleID] ?? .init())
             cached.configureComponentDisplayModes(settings.componentDisplayModes[app.bundleID] ?? [:])
             cached.configureComponentPresentations(settings.componentPresentations[app.bundleID] ?? [:])
             cached.configureText(settings.textComponents[app.bundleID] ?? TextComponentItem.initial)
+            cached.configureLyrics(settings.lyricsComponents[app.bundleID] ?? .init())
             return cached
         }
         let result = AppBar(app: app, chatGPTControlsEnabled: settings.chatGPTControlsEnabled,
                             shortcuts: settings.chatShortcuts, phrases: settings.quickPhrasesByApp[app.bundleID] ?? [],
                             keyboardButtons: settings.keyboardButtons[app.bundleID] ?? .init(),
+                            menuButtons: settings.menuButtons[app.bundleID] ?? .init(),
                             componentDisplayModes: settings.componentDisplayModes[app.bundleID] ?? [:],
                             componentPresentations: settings.componentPresentations[app.bundleID] ?? [:],
-                            textItems: settings.textComponents[app.bundleID] ?? TextComponentItem.initial)
+                            textItems: settings.textComponents[app.bundleID] ?? TextComponentItem.initial,
+                            lyrics: settings.lyricsComponents[app.bundleID] ?? .init(),
+                            persistsLayout: persistsLayouts)
+        result.onActionError = { [weak self] message in
+            self?.statusItem.button?.toolTip = message
+            NSSound.beep()
+        }
+        result.configureLyricsDisplay(lyricsController.display)
+        result.onLyricsSearch = { [weak self] in self?.showSettings(lyrics: true) }
+        result.onLyricsSeek = { [weak self] offset in self?.lyricsController.seek(by: offset) }
+        lyricsController.onSeekError = { [weak self] message in self?.statusItem.button?.toolTip = message }
+        result.onLayoutChange = { [weak self] in self?.applyRules() }
         providers[app.bundleID] = result
         return result
     }
@@ -405,9 +446,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyRules()
     }
 
-    @objc private func openSettings() {
+    @objc private func openSettings() { showSettings(lyrics: false) }
+
+    private func showSettings(lyrics: Bool) {
         if settingsWindow == nil {
-            let controller = SettingsWindowController(store: settings)
+            let model = LyricsSearchModel(repository: lyricsRepository, read: { completion in
+                TBReadNowPlaying { values in
+                    let state = LyricsPlayback(nowPlaying: values)
+                    MainActor.assumeIsolated { completion(state) }
+                }
+            }, observe: { changed in
+                guard let token = TBObserveNowPlaying({ _ in MainActor.assumeIsolated { changed() } }) else { return nil }
+                return { TBStopObservingMediaPlaying(token) }
+            })
+            let controller = SettingsWindowController(store: settings, lyricsModel: model)
             controller.onPreviewApp = { [weak self] app in
                 self?.previewApp = app
                 self?.applyRules()
@@ -415,6 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.onCustomizeApp = { [weak self] app in self?.customize(app) }
             settingsWindow = controller
         }
+        if lyrics { settingsWindow?.openLyricsSettings() }
         updateControlStrip()
         settingsWindow?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -437,6 +490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyRules() {
         guard statusItem != nil else { return }
+        defer { synchronizeLyrics() }
         let app = NSWorkspace.shared.frontmostApplication
         if let previewApp, settingsWindow?.window?.isVisible == true, NSApp.isActive {
             dismissBar()
@@ -449,6 +503,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         settingsWindow?.window?.touchBar = nil
         settingsWindow?.window?.contentView?.touchBar = nil
+        // An explicit invocation temporarily overrides app policy, including
+        // Native/Selection and Pause. It never changes those saved preferences.
+        if enhancedBarVisible {
+            present(provider(for: .enhancedBar))
+            settingsWindow?.update(status: "Enhanced Bar · repeat the Control Strip action to restore the app’s bar")
+            return
+        }
         let id = app?.bundleIdentifier ?? ""
         let name = app?.localizedName ?? "Unknown App"
         let enabled = settings.shouldEnhance(id, manuallyHidden: hiddenForCurrentApp)
@@ -462,11 +523,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func present(_ provider: AppBar) {
-        guard presented !== provider else { return }
         barHost.display(provider)
+        guard presented !== provider else { return }
         // Changing apps must not dismiss the modal host and expose the native bar.
         if presented != nil || TBPresent(barHost.bar) { presented = provider }
         statusItem.button?.title = presented != nil ? "TB ●" : "TB !"
+    }
+
+    private func synchronizeLyrics() {
+        let visible: AppBar?
+        if let previewApp, settingsWindow?.window?.isVisible == true, NSApp.isActive { visible = providers[previewApp.bundleID] }
+        else { visible = presented }
+        lyricsController.setEnabled(visible?.bar.itemIdentifiers.contains(AppBar.itemID("lyrics")) == true)
     }
 
     private func dismissBar() {
@@ -476,13 +544,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showBar() { hiddenForCurrentApp = false; applyRules() }
+    @objc func toggleEnhancedBar() {
+        enhancedBarVisible.toggle()
+        applyRules()
+    }
     @objc private func hideBar() {
         previewApp = nil
+        enhancedBarVisible = false
         hiddenForCurrentApp = true
         applyRules()
     }
     @objc private func willSleep(_ notification: Notification) {
+        lyricsController.setEnabled(false)
         controlStripAutomation.stop()
+        enhancedBarVisible = false
         previewApp = nil
         settingsWindow?.window?.touchBar = nil
         settingsWindow?.window?.contentView?.touchBar = nil
@@ -501,6 +576,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
+        lyricsController.setEnabled(false)
+        lyricsController.onChange = nil
         clockTimer?.invalidate()
         settings.onChange = nil
         controlStripAutomation.onChange = nil
