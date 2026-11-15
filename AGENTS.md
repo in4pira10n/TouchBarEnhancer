@@ -177,6 +177,15 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   Use the configured style on every lyric/status render, retain Fill/region width
   settings during edits, and let shared Text measurement recompute Hug. Styling
   must never restart media observation/search or persist live lyric content.
+- Lyrics additionally applies EchoDiary-style Pangu spacing through native
+  attributed glyph kerning: add 0.25 em at adjacent Han/kana and ASCII letter or
+  digit boundaries, on top of configured tracking. Preserve every original
+  character, explicit whitespace, URLs, cache data and accessibility text; do not
+  insert literal spaces, load a web view or add GTK/Pango. `chineseSpacing` is
+  presentation-only and enabled for Lyrics, never for ordinary Text or buttons.
+  Shared native measurement and drawing must use the same attributes so Hug,
+  Fill and truncation include those gaps. Cover overlapping mixed boundaries,
+  supplementary Han, emoji, URLs, user tracking and reused views.
 - Text alignment is within an entry's cell; component alignment positions the
   whole list in Scrolling mode. Keep these separate. The 30-point hardware height
   remains fixed; oversized typography can be clipped. Reject nonfinite/out-of-range
@@ -202,9 +211,16 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   `LyricsSettings.swift` owns Settings → Lyrics. Source rows support native
   stable-identity drag reordering; priority and the default-on fuzzy preference
   persist in `SettingsStore.lyricsSearch` and reload visible lyrics immediately.
-  Try exact title/artist matches across the ordered sources before a fuzzy pass.
+  Try normalized exact title AND artist matches across the ordered sources before a fuzzy pass.
   Fuzzy matching permits artist aliases, title annotations and small title edits,
   while retaining available duration and live/remix/instrumental version checks.
+  Retry title-only queries to avoid provider-specific artist aliases. Rank fuzzy
+  candidates across sources by known compatible duration first, then smallest
+  duration difference, metadata score and stable source order. An absent artist
+  is allowed when title and duration agree; a duration alone never establishes
+  a match. Without duration, retain title/artist checks. Version mismatches still
+  fail, even with identical duration. Version automatic matching caches when the
+  algorithm changes, without expiring or deleting manual selections.
   Changes invalidate automatic cache by configuration, never manual choices.
   Explicit search allows an edited title and optional artist, returns candidates
   with provider identity, and loads a timed preview only after selection. Use
@@ -217,6 +233,13 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   Observe metadata only while the Lyrics pane is visible, without polling or
   changing playback. Cancel search/preview work on replacement and pane close;
   ignore late callbacks, retain the native field editor and preview selection.
+  Opening the pane automatically fills the current title/artist; unedited inputs
+  follow metadata updates, while edits (including cleared fields) survive further
+  notifications. Reopening fills the then-current song. Do not add a redundant
+  Use Current Song button. Search recommends and previews a safe exact/duration
+  match, but only explicit Use Lyrics writes a manual selection. Restore Automatic
+  appears only for a saved selection. Preserve the captured apply target while
+  songs change, with no automatic search on typing or autofill.
   MediaRemote reads normalized metadata/elapsed/timestamp/rate from the bridge
   on start and metadata/seek/playing/source notifications, never via polling.
   Locally extrapolate playback time and schedule one one-shot deadline for the
@@ -502,6 +525,11 @@ claims about official Apple HIG dimensions. Preserve user data and layouts.
   rebuilding the field editor on every keystroke. Keep standard Edit menu actions
   so selection, copy, paste, undo and text navigation continue to work.
 - Settings is resizable, with a minimum content size appropriate to each pane.
+  Enforce that minimum with required content-view width/height constraints;
+  AppKit ignores `contentMinSize` for Auto Layout windows. Replace the outgoing
+  minimum constraints before resizing to a smaller pane. Regression checks must
+  verify the settled native fitting size and actual bounds, including undersized
+  frame requests and last-pane restoration, not only the `contentMinSize` value.
   Keep the window's top edge when switching panes and remember its resized size
   per pane for the current session. App details scroll vertically and component
   tables scroll horizontally when column minimums no longer fit.

@@ -4,7 +4,7 @@ English · [简体中文](README.zh-CN.md)
 
 A native macOS menu bar app for building per-app Touch Bars with reusable components. Built with Swift and AppKit, without BetterTouchTool or a full Xcode installation.
 
-**Status:** early development, currently version 0.2.0. Requires macOS 14 or later and a MacBook Pro with a Touch Bar for hardware use. The app interface is in English.
+**Status:** early development, currently version 0.3.0. Requires macOS 14 or later and a MacBook Pro with a Touch Bar for hardware use. The app interface is in English.
 
 ## Features
 
@@ -16,13 +16,13 @@ A native macOS menu bar app for building per-app Touch Bars with reusable compon
 - Selection and exclusion policies, explicit per-app overrides, global pause, and silent launch enabled by default.
 - Preserves the system Control Strip and replaces the modal bar's leftmost close slot with the first component.
 - Configurable Control Strip button with an SF Symbol, tap/hold/modifier actions, and Bluetooth/system playback automation. Uses private registration APIs; placement is managed by macOS.
-- A shared **Enhanced Bar**, toggled from a Control Strip interaction, with the same reusable components as app layouts. **Lyrics** shows the current timed line from NetEase, QQ Music or LRCLIB, with a local cache.
+- A shared **Enhanced Bar**, toggled from a Control Strip interaction, with the same reusable components as app layouts. **Lyrics** shows the current timed line from NetEase, QQ Music or LRCLIB, with a local cache, native Pangu-style Chinese/Latin spacing, and per-app typography. Matching prefers exact title/artist, then the closest compatible duration. The search pane fills the current song and previews recommended results before you save a choice.
 
 ## Build and run
 
 ### Download
 
-Download the Apple Silicon (`arm64`) ZIP from [GitHub Releases](https://github.com/in4pira10n/TouchBarEnhancer/releases/latest), extract it, and move `TouchBarEnhancer.app` to a stable location before granting Accessibility access. The current binary requires macOS 14+ and is locally signed, **not notarized**; Gatekeeper may block it. See the release notes before installing. Intel binaries are not included in this release.
+Download the Universal (`arm64` + `x86_64`) ZIP from [GitHub Releases](https://github.com/in4pira10n/TouchBarEnhancer/releases/latest), extract it, and move `TouchBarEnhancer.app` to a stable location before granting Accessibility access. The same app supports Apple Silicon and Intel Macs running macOS 14+. It is locally signed, **not notarized**; Gatekeeper may block it. See the release notes before installing.
 
 ### Requirements
 
@@ -57,6 +57,8 @@ open -g dist/TouchBarEnhancer.app
 Alternatively, put the identity's name or fingerprint on the first line of `.signing-identity.local` in the project root. This file is ignored by Git. Never commit certificates or private keys.
 
 The build script fails if the identity is missing or unavailable; it never falls back to ad-hoc signing. Keep the same signing certificate, bundle ID, and installation path across updates to help retain Accessibility authorization. Quit the running app before rebuilding its bundle, then relaunch the same `dist/TouchBarEnhancer.app`.
+
+For a Universal app containing both Apple Silicon and Intel binaries, use `bash scripts/build-app.sh --universal`. This builds each architecture with SwiftPM and combines them with `lipo` before signing. Without the flag, the script builds only the host architecture for local development.
 
 ## Set up your bar
 

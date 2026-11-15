@@ -94,6 +94,10 @@ struct LyricsSettingsSmoke {
 
         // Observation is tied to the pane; no player polling or search on typing.
         model.setActive(true); precondition(reads == 1 && model.title == "Original")
+        precondition(!descendants(editor).compactMap { $0 as? NSButton }.contains { $0.title == "Use Current Song" })
+        state.track.title = "Updated metadata"; event?()
+        precondition(model.title == "Updated metadata" && model.artist == "Artist", "Untouched query follows current metadata without polling")
+        state.track = original; event?()
         let titleField = descendants(editor).compactMap { $0 as? NSTextField }.first { $0.accessibilityIdentifier() == "lyricsSearchTitle" }!
         titleField.stringValue = "Alternate spelling"
         editor.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: titleField))
@@ -102,6 +106,10 @@ struct LyricsSettingsSmoke {
         state.track = .init(title: "Next Song", artist: "Someone Else"); event?()
         try await settle { !model.searching }
         precondition(model.targetTrack == original && model.candidates.count == 1 && model.currentTrack == state.track)
+        precondition(model.title == "Alternate spelling", "Song notifications must not overwrite a manually edited query")
+        try await settle { model.preview != nil }
+        precondition(model.selectedID == model.candidates.first?.identity && repository.selection(for: original) == nil,
+            "Best candidate previews automatically, but only Use Lyrics persists it")
         editor.resultsTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         try await settle { model.preview != nil }
         let use = descendants(editor).compactMap { $0 as? NSButton }.first { $0.title == "Use Lyrics" }!
@@ -134,6 +142,12 @@ struct LyricsSettingsSmoke {
         pane("general"); precondition(!model.active && event == nil && cancels == 1)
         let count = reads; controller.resumePreviewIfNeeded(); precondition(reads == count)
         pane("lyrics")
+        model.setActive(true)
+        precondition(model.title == state.track.title && model.artist == state.track.artist,
+            "Reopening Lyrics pre-fills the new current song rather than a previous query")
+        model.title = ""; model.artist = ""; event?()
+        precondition(model.title.isEmpty && model.artist.isEmpty, "An intentionally cleared query survives metadata events")
+        model.setActive(false)
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             window.appearance = NSAppearance(named: appearance); window.layoutIfNeeded()
             window.displayIfNeeded()

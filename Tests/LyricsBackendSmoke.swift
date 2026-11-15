@@ -20,7 +20,7 @@ private final class FixtureClock {
 }
 
 private actor FixtureNetwork {
-    enum Mode { case found, missing, outage, wrongVersion, alias, strictLater }
+    enum Mode { case found, missing, outage, wrongVersion, alias, strictLater, closestDuration, titleOnlyDuration, unrelatedDuration }
     var mode: Mode = .found
     var calls: [URLRequest] = []
     func setMode(_ mode: Mode) { self.mode = mode }
@@ -31,6 +31,26 @@ private actor FixtureNetwork {
         let host = request.url!.host!, path = request.url!.path
         precondition(request.url!.scheme == "https")
         precondition(request.value(forHTTPHeaderField: "Cookie") == nil)
+        if mode == .closestDuration || mode == .titleOnlyDuration || mode == .unrelatedDuration {
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems ?? []
+            if host == "lrclib.net" {
+                if mode == .titleOnlyDuration && query.contains(where: { $0.name == "artist_name" }) { return Data("[]".utf8) }
+                let title = mode == .unrelatedDuration ? "Unrelated Song" : "A Song"
+                return try JSONSerialization.data(withJSONObject: [
+                    ["id": 10, "trackName": "A Song (Live)", "artistName": "Alias", "duration": 100, "syncedLyrics": "[00:00]Wrong version"],
+                    ["id": 11, "trackName": title, "artistName": "Alias", "duration": 100.2, "syncedLyrics": "[00:00]Closest duration"]
+                ])
+            }
+            if host == "music.163.com" {
+                if path == "/api/search/get" {
+                    return Data((mode == .closestDuration
+                        ? #"{"code":200,"result":{"songs":[{"id":20,"name":"A Song","artists":[{"name":"Alias"}],"duration":104000}]}}"#
+                        : #"{"code":200,"result":{"songs":[]}}"#).utf8)
+                }
+                return Data(#"{"code":200,"lrc":{"lyric":"[00:00]Less accurate duration"}}"#.utf8)
+            }
+            return Data(#"{"code":0,"data":{"song":{"itemlist":[]}}}"#.utf8)
+        }
         let value: String
         if host == "lrclib.net" {
             if mode == .missing { value = "[]" }
@@ -111,7 +131,7 @@ struct LyricsBackendSmoke {
         precondition(LyricsRepository.matchScore(.init(title: "A Song (Live)", artist: "Artist", duration: 100), for: track) == nil)
         precondition(LyricsRepository.matchScore(.init(title: "A Song", artist: "Cover Artist", duration: 500), for: track) == nil)
         precondition(LyricsRepository.matchScore(.init(title: "A Song", artist: "Cover Artist", duration: 100), for: track) == nil)
-        precondition(LyricsRepository.matchScore(.init(title: "答案", artist: "杨坤, 郭采洁"), for: .init(title: "答案", artist: "Yang Kun & Amber Kuo")) != nil)
+        precondition(LyricsRepository.matchScore(.init(title: "答案", artist: "杨坤, 郭采洁"), for: .init(title: "答案", artist: "Yang Kun & Amber Kuo"), fuzzy: true) != nil)
         precondition(!LyricsTrack(title: "Long", artist: "Artist", duration: .greatestFiniteMagnitude).cacheKey.isEmpty)
         let folder = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("TouchBarEnhancer-LyricsTests-\(UUID())")
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -130,6 +150,11 @@ struct LyricsBackendSmoke {
         precondition(reloaded == result)
         let afterCache = await network.count(); precondition(afterCache == calls)
         let cacheFile = folder.appendingPathComponent(track.cacheKey + ".json")
+        var previousAlgorithm = try JSONSerialization.jsonObject(with: Data(contentsOf: cacheFile)) as! [String: Any]
+        previousAlgorithm.removeValue(forKey: "matchingVersion"); previousAlgorithm.removeValue(forKey: "result")
+        try JSONSerialization.data(withJSONObject: previousAlgorithm).write(to: cacheFile)
+        let refreshedAlgorithm = try await LyricsRepository(directory: folder, transport: transport, preferences: preferences).search(track)
+        precondition(refreshedAlgorithm == result, "Old negative caches cannot suppress the improved matching algorithm")
         var corrupt = try JSONSerialization.jsonObject(with: Data(contentsOf: cacheFile)) as! [String: Any]
         corrupt["result"] = ["source": "Fixture", "instrumental": false,
             "lyrics": ["lines": [["time": 5, "text": "Wrong"], ["time": 1, "text": "Order"]]]]
@@ -166,7 +191,26 @@ struct LyricsBackendSmoke {
         let strict = try await repository.search(track, refresh: true)
         precondition(strict?.source == "LRCLIB", "Exact match outranks earlier fuzzy alias")
         await network.setMode(.alias)
-        let alias = try await repository.search(track, refresh: true); precondition(alias?.source == "QQ Music")
+        let alias = try await repository.search(track, refresh: true); precondition(alias?.source == "LRCLIB", "Known duration outranks an earlier provider without duration; album breaks equal-duration ties")
+        await network.setMode(.closestDuration)
+        let closest = try await repository.search(track, refresh: true)
+        precondition(closest?.source == "LRCLIB" && closest?.lyrics?.lines.first?.text == "Closest duration",
+            "Closest duration wins across providers, while Live with the same duration stays rejected")
+        await network.setMode(.titleOnlyDuration)
+        let broad = try await repository.search(track, refresh: true)
+        precondition(broad?.source == "LRCLIB", "Title-only retry discovers a duration match despite a different artist")
+        let artistless = LyricsTrack(title: track.title, artist: "", duration: track.duration)
+        let byTitle = try await repository.search(artistless, refresh: true)
+        precondition(byTitle?.lyrics?.lines.first?.text == "Closest duration", "Artist is optional when title and duration match")
+        let noDuration = try await repository.search(.init(title: track.title, artist: ""), refresh: true)
+        precondition(noDuration == nil, "Missing artist and duration must not auto-select an arbitrary cover")
+        let manual = try await repository.searchCandidates(title: track.title, artist: "", duration: track.duration)
+        precondition(manual.first?.id == "11", "Manual search recommends the safe duration match before wrong versions")
+        await network.setMode(.unrelatedDuration)
+        let unrelated = try await repository.search(artistless, refresh: true)
+        precondition(unrelated == nil, "Duration alone cannot match a different title")
+        precondition(LyricsRepository.durationDifference(.init(title: "A Song", artist: "Alias", duration: .nan), for: track) == nil)
+        await network.setMode(.alias)
         repository.configure(.init(fuzzyMatching: false))
         let disabled = try await repository.search(track, refresh: true); precondition(disabled == nil)
         repository.configure(.init())

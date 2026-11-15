@@ -9,7 +9,9 @@ extension Notification.Name {
 final class LyricsSearchModel {
     let repository: LyricsRepository
     var onChange: (() -> Void)?
-    var title = "", artist = ""
+    var title = "" { didSet { queryEdited = true; autofillOnNextRead = false } }
+    var artist = "" { didSet { queryEdited = true; autofillOnNextRead = false } }
+    private var queryEdited = false, autofillOnNextRead = false
     private(set) var currentTrack: LyricsTrack?
     private(set) var targetTrack: LyricsTrack?
     private(set) var candidates: [LyricsRepository.Candidate] = []
@@ -33,6 +35,7 @@ final class LyricsSearchModel {
         guard active != value else { return }
         active = value
         if value {
+            autofillOnNextRead = true
             unsubscribe = observe { [weak self] in self?.readTrack() }
             readTrack()
         } else {
@@ -45,15 +48,12 @@ final class LyricsSearchModel {
         read { [weak self] state in
             guard let self, self.active, self.readRequest == id else { return }
             self.currentTrack = state?.track
-            if self.title.isEmpty && self.artist.isEmpty, let track = state?.track {
+            if let track = state?.track, self.autofillOnNextRead || !self.queryEdited {
                 self.title = track.title; self.artist = track.artist
+                self.queryEdited = false; self.autofillOnNextRead = false
             }
             self.onChange?()
         }
-    }
-    func useCurrentTrack() {
-        guard let currentTrack else { return }
-        title = currentTrack.title; artist = currentTrack.artist; onChange?()
     }
     func cancel() {
         request = UUID(); previewRequest = UUID()
@@ -65,14 +65,20 @@ final class LyricsSearchModel {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Enter a song title."; onChange?(); return }
         targetTrack = currentTrack ?? LyricsTrack(title: title, artist: artist)
         candidates = []; selectedID = nil; preview = nil; searching = true; status = "Searching…"; onChange?()
-        let id = request, queryTitle = title, queryArtist = artist
+        let id = request, queryTitle = title, queryArtist = artist, duration = targetTrack?.duration
         searchTask = Task { [weak self, repository] in
             do {
-                let found = try await repository.searchCandidates(title: queryTitle, artist: queryArtist)
+                let found = try await repository.searchCandidates(title: queryTitle, artist: queryArtist, duration: duration)
                 guard !Task.isCancelled, let self, self.request == id else { return }
                 self.candidates = found; self.searching = false; self.searchTask = nil
                 self.status = found.isEmpty ? "No results. Try a shorter title or another artist name." : "\(found.count) results"
                 self.onChange?()
+                let query = LyricsTrack(title: queryTitle, artist: queryArtist, duration: duration)
+                if let recommended = found.first, LyricsRepository.matchScore(recommended.track, for: query) != nil
+                    || LyricsRepository.durationDifference(recommended.track, for: query) != nil
+                        && LyricsRepository.matchScore(recommended.track, for: query, fuzzy: true) != nil {
+                    self.selectCandidate(recommended.identity)
+                }
             } catch {
                 guard !Task.isCancelled, let self, self.request == id else { return }
                 self.searching = false; self.searchTask = nil; self.status = "Search failed. Check your connection and try again."; self.onChange?()
@@ -124,7 +130,6 @@ final class LyricsSettingsPane: NSView, NSTableViewDataSource, NSTableViewDelega
     private let searchButton = NSButton(title: "Search", target: nil, action: nil)
     private let useButton = NSButton(title: "Use Lyrics", target: nil, action: nil)
     private let restoreButton = NSButton(title: "Restore Automatic", target: nil, action: nil)
-    private let currentButton = NSButton(title: "Use Current Song", target: nil, action: nil)
     private let fuzzy = NSButton(checkboxWithTitle: "Allow fuzzy matching", target: nil, action: nil)
     private static let dragType = NSPasteboard.PasteboardType("local.starfruit.TouchBarEnhancer.lyricsSource")
     private var rows: [String] = []
@@ -140,22 +145,19 @@ final class LyricsSettingsPane: NSView, NSTableViewDataSource, NSTableViewDelega
         let sourceScroll = tableScroll(sourcesTable)
         sourceScroll.heightAnchor.constraint(equalToConstant: 82).isActive = true
         fuzzy.state = store.lyricsSearch.fuzzyMatching ? .on : .off; fuzzy.target = self; fuzzy.action = #selector(changeFuzzy)
-        fuzzy.toolTip = "Try similar titles and artist aliases after exact matches. Duration and version checks still apply."
+        fuzzy.toolTip = "After exact matches, prefer similar titles with the closest playing duration. Artist is optional when duration matches."
         let heading = NSTextField(labelWithString: "Search Order"); heading.font = .systemFont(ofSize: 13, weight: .semibold)
-        let hint = NSTextField(labelWithString: "Drag sources to set priority. Exact matches are tried before fuzzy matches.")
-        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize); hint.textColor = .secondaryLabelColor
+        sourcesTable.toolTip = "Drag to reorder sources. Exact matches first, then closest duration."
         titleField.placeholderString = "Song title"; titleField.setAccessibilityIdentifier("lyricsSearchTitle")
         artistField.placeholderString = "Artist (optional)"; artistField.setAccessibilityIdentifier("lyricsSearchArtist")
         for field in [titleField, artistField] { field.delegate = self; field.target = self; field.action = #selector(search) }
         searchButton.target = self; searchButton.action = #selector(search)
         useButton.target = self; useButton.action = #selector(useLyrics)
         restoreButton.target = self; restoreButton.action = #selector(restore)
-        currentButton.target = self; currentButton.action = #selector(useCurrent)
         let searchRow = NSStackView(views: [titleField, artistField, searchButton]); searchRow.spacing = 8; searchRow.alignment = .centerY
         titleField.widthAnchor.constraint(equalTo: artistField.widthAnchor, multiplier: 1.2).isActive = true
         playing.lineBreakMode = .byTruncatingTail
-        let nowRow = NSStackView(views: [playing, currentButton]); nowRow.spacing = 12; nowRow.alignment = .centerY
-        playing.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        playing.textColor = .secondaryLabelColor
         for (key, name, width) in [("title", "Title", 230.0), ("artist", "Artist", 170.0), ("source", "Source", 100.0), ("duration", "Time", 65.0)] {
             let column = NSTableColumn(identifier: .init(key)); column.title = name; column.width = width; column.minWidth = key == "duration" ? 50 : 75
             resultsTable.addTableColumn(column)
@@ -173,14 +175,14 @@ final class LyricsSettingsPane: NSView, NSTableViewDataSource, NSTableViewDelega
         target.font = .systemFont(ofSize: NSFont.smallSystemFontSize); target.textColor = .secondaryLabelColor; target.lineBreakMode = .byTruncatingTail
         feedback.font = .systemFont(ofSize: NSFont.smallSystemFontSize); feedback.textColor = .secondaryLabelColor
         let separator = NSBox(); separator.boxType = .separator; separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        let stack = NSStackView(views: [heading, sourceScroll, hint, fuzzy, separator, nowRow, searchRow, resultsScroll, previewScroll, target, bottom, feedback])
+        let stack = NSStackView(views: [heading, sourceScroll, fuzzy, separator, playing, searchRow, resultsScroll, previewScroll, target, bottom, feedback])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10; stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20), stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 20), stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -20)
         ])
-        for view in [sourceScroll, separator, nowRow, searchRow, resultsScroll, previewScroll, target, feedback] {
+        for view in [sourceScroll, separator, playing, searchRow, resultsScroll, previewScroll, target, feedback] {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         model.onChange = { [weak self] in self?.refresh() }; refresh()
@@ -194,7 +196,6 @@ final class LyricsSettingsPane: NSView, NSTableViewDataSource, NSTableViewDelega
         if titleField.currentEditor() == nil { titleField.stringValue = model.title }
         if artistField.currentEditor() == nil { artistField.stringValue = model.artist }
         playing.stringValue = model.currentTrack.map { "\($0.title) — \($0.artist)" } ?? "No song playing"
-        currentButton.isEnabled = model.currentTrack != nil
         target.stringValue = model.targetTrack.map { "Save for: \($0.title) — \($0.artist)" } ?? ""
         target.isHidden = model.targetTrack == nil
         let ids = model.candidates.map(\.identity)
@@ -211,13 +212,13 @@ final class LyricsSettingsPane: NSView, NSTableViewDataSource, NSTableViewDelega
         searchButton.isEnabled = !model.searching
         useButton.isEnabled = model.preview != nil && model.targetTrack != nil
         restoreButton.isEnabled = (model.targetTrack ?? model.currentTrack).map { model.repository.selection(for: $0) != nil } ?? false
+        restoreButton.isHidden = !restoreButton.isEnabled
         feedback.stringValue = model.status; feedback.isHidden = model.status.isEmpty
     }
     func controlTextDidChange(_ notification: Notification) {
         model.title = titleField.stringValue; model.artist = artistField.stringValue
     }
     @objc private func search() { model.title = titleField.stringValue; model.artist = artistField.stringValue; model.search() }
-    @objc private func useCurrent() { model.useCurrentTrack() }
     @objc private func useLyrics() { model.useSelection() }
     @objc private func restore() { model.restoreAutomatic() }
     @objc private func changeFuzzy() {

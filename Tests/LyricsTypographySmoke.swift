@@ -22,6 +22,29 @@ struct LyricsTypographySmoke {
         application.setActivationPolicy(.accessory); application.finishLaunching()
         let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let clipboard = NSPasteboard.general.changeCount
+        let mixed = "中文ABC中文123中文"
+        let spacingStyle = TextComponentStyle(fontSize: 20, tracking: 2)
+        let spaced = spacingStyle.attributedString(mixed, chineseSpacing: true)
+        precondition(spaced.string == mixed, "Typesetting must never insert spaces into source text")
+        let gapIndices = [1, 4, 6, 9]
+        for index in 0..<spaced.length {
+            let kern = spaced.attribute(.kern, at: index, effectiveRange: nil) as! Double
+            precondition(kern == (gapIndices.contains(index) ? 7 : 2), "Quarter-em boundary gap adds to user tracking")
+        }
+        let supplementary = spacingStyle.attributedString("𠀀A中🧑‍💻B文", chineseSpacing: true)
+        precondition(supplementary.string == "𠀀A中🧑‍💻B文")
+        precondition(supplementary.attribute(.kern, at: 0, effectiveRange: nil) as! Double == 7)
+        for sample in ["中文 ABC", "纯中文歌词", "English words 123", "中文https://example.com/中文ABC", "中文www.example.com/中文ABC"] {
+            let text = spacingStyle.attributedString(sample, chineseSpacing: true)
+            precondition(text.string == sample)
+            text.enumerateAttribute(.kern, in: NSRange(location: 0, length: text.length)) { value, _, _ in
+                precondition(value as! Double == 2, "Existing whitespace, punctuation and URLs stay unchanged")
+            }
+        }
+        let ordinary = TextComponentItem(text: mixed, style: spacingStyle).scrollingItem
+        var lyric = ordinary; lyric.chineseSpacing = true
+        precondition(ScrollingComponentItemView.width(for: lyric) > ScrollingComponentItemView.width(for: ordinary),
+            "Native Hug measurement includes mixed-script gaps; ordinary Text remains unchanged")
         let suite = "TouchBarEnhancer.LyricsTypographyTests.\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -125,6 +148,12 @@ struct LyricsTypographySmoke {
             let attributes = current.attributedStringValue.attributes(at: 0, effectiveRange: nil)
             precondition((attributes[.foregroundColor] as! NSColor) == .white && attributes[.kern] == nil)
             precondition(current.alignment == .center && current.lineBreakMode == .byTruncatingTail)
+        }
+        provider.configureLyricsDisplay(.init(text: mixed, detail: "Mixed-script fixture"))
+        for scrubber in scrubbers {
+            let current = label(scrubber)
+            precondition(current.stringValue == mixed)
+            precondition(current.attributedStringValue.attribute(.kern, at: 1, effectiveRange: nil) as? Double != nil)
         }
         precondition(!window.isVisible && NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground)
         precondition(NSPasteboard.general.changeCount == clipboard)

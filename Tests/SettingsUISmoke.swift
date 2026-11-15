@@ -42,6 +42,53 @@ struct SettingsUISmoke {
         store.save()
         let controller = SettingsWindowController(store: store)
         let window = controller.window!
+        func settleWindow() {
+            for _ in 0..<4 {
+                window.layoutIfNeeded()
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+            }
+        }
+        for (id, minimum) in [
+            ("general", NSSize(width: 590, height: 200)),
+            ("lyrics", NSSize(width: 760, height: 650)),
+            ("controlStrip", NSSize(width: 820, height: 560)),
+            ("applications", NSSize(width: 590, height: 480)),
+            ("lyrics", NSSize(width: 760, height: 650))
+        ] {
+            let item = window.toolbar!.items.first { $0.itemIdentifier.rawValue == id }!
+            let top = window.frame.maxY
+            precondition(app.sendAction(item.action!, to: item.target, from: item))
+            settleWindow()
+            let content = window.contentView!
+            precondition(content.fittingSize.width >= minimum.width && content.fittingSize.height >= minimum.height,
+                "\(id): native Auto Layout minimum \(content.fittingSize) must enforce \(minimum), not only contentMinSize")
+            precondition(content.bounds.width >= minimum.width && content.bounds.height >= minimum.height)
+            precondition(abs(window.frame.maxY - top) < 0.5)
+        }
+        window.setContentSize(NSSize(width: 193, height: 300))
+        settleWindow()
+        precondition(window.contentView!.bounds.width >= 760 && window.contentView!.bounds.height >= 650,
+            "Lyrics must recover even when a frame smaller than its minimum is requested")
+        window.setContentSize(NSSize(width: 1000, height: 750))
+        settleWindow()
+        for id in ["general", "lyrics"] {
+            let item = window.toolbar!.items.first { $0.itemIdentifier.rawValue == id }!
+            precondition(app.sendAction(item.action!, to: item.target, from: item))
+            settleWindow()
+        }
+        precondition(window.contentView!.bounds.size == NSSize(width: 1000, height: 750),
+            "Switching back must restore the user's larger Lyrics size")
+        window.close()
+        let restoredController = SettingsWindowController(store: SettingsStore(defaults: defaults))
+        let restoredWindow = restoredController.window!
+        restoredWindow.layoutIfNeeded()
+        precondition(restoredWindow.toolbar!.selectedItemIdentifier?.rawValue == "lyrics")
+        precondition(restoredWindow.contentView!.fittingSize.width >= 760 && restoredWindow.contentView!.bounds.width >= 760,
+            "Restoring the last selected pane must enforce its native minimum before showing")
+        precondition(!restoredWindow.isVisible)
+        render(restoredWindow.contentView!, "lyrics-minimum")
+        let applications = window.toolbar!.items.first { $0.itemIdentifier.rawValue == "applications" }!
+        precondition(app.sendAction(applications.action!, to: applications.target, from: applications))
         controller.update(status: "")
         render(window.contentView!, "applications")
         let general = window.toolbar!.items.first { $0.itemIdentifier.rawValue == "general" }!
@@ -159,6 +206,6 @@ struct SettingsUISmoke {
         render(pane, "apps-generic")
         precondition(!host.isVisible && !window.isVisible)
         precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground)
-        print("Settings UI checks passed: no Save buttons, live persistence, inline validation, aligned forms, phrase content, field editor focus, offscreen renders, no activation")
+        print("Settings UI checks passed: native pane minimums, undersized-frame recovery, resized/last-pane restoration, no Save buttons, live persistence, inline validation, aligned forms, phrase content, field editor focus, offscreen renders, no activation")
     }
 }

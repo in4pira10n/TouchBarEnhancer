@@ -63,7 +63,7 @@ struct TextComponentStyle: Codable, Equatable {
     @MainActor var lineBreakMode: NSLineBreakMode {
         truncation?.value ?? NSTextField(labelWithString: "").lineBreakMode
     }
-    @MainActor func attributedString(_ text: String) -> NSAttributedString {
+    @MainActor func attributedString(_ text: String, chineseSpacing: Bool = false) -> NSAttributedString {
         var foreground = color.flatMap(ChatColor.resolve) ?? .white
         if let opacity { foreground = foreground.withAlphaComponent(CGFloat(opacity)) }
         var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: foreground]
@@ -74,7 +74,27 @@ struct TextComponentStyle: Codable, Equatable {
         let paragraph = NSParagraphStyle.default.mutableCopy() as! NSMutableParagraphStyle
         paragraph.alignment = textAlignment; paragraph.lineBreakMode = lineBreakMode
         attributes[.paragraphStyle] = paragraph
-        return NSAttributedString(string: text, attributes: attributes)
+        let result = NSMutableAttributedString(string: text, attributes: attributes)
+        if chineseSpacing { ChineseLyricTypography.apply(to: result, fontSize: font.pointSize, tracking: tracking ?? 0) }
+        return result
+    }
+}
+
+/// EchoDiary's Pangu-style quarter-em gaps, expressed as native glyph spacing.
+/// Characters, cache data and accessibility text remain exactly as supplied.
+enum ChineseLyricTypography {
+    private static let boundaries = try! NSRegularExpression(
+        pattern: #"[\p{Han}\p{Hiragana}\p{Katakana}](?=[A-Za-z0-9])|[A-Za-z0-9](?=[\p{Han}\p{Hiragana}\p{Katakana}])"#)
+    private static let urls = try! NSRegularExpression(pattern: #"(?:https?://|www\.)[^\s<>]+"#, options: .caseInsensitive)
+
+    static func apply(to text: NSMutableAttributedString, fontSize: CGFloat, tracking: Double) {
+        let range = NSRange(location: 0, length: text.length)
+        let excluded = urls.matches(in: text.string, range: range).map(\.range)
+        for match in boundaries.matches(in: text.string, range: range) {
+            let pair = NSRange(location: match.range.location, length: match.range.length + 1)
+            guard !excluded.contains(where: { NSIntersectionRange($0, pair).length > 0 }) else { continue }
+            text.addAttribute(.kern, value: tracking + Double(fontSize) * 0.25, range: match.range)
+        }
     }
 }
 
@@ -98,7 +118,11 @@ final class TextComponent {
         scroller.onNaturalWidthChange = { [weak self] in self?.updateWidth() }
         configure(items)
     }
-    func configure(_ items: [TextComponentItem]) { scroller.configure(items.map(\.scrollingItem)) }
+    func configure(_ items: [TextComponentItem], chineseSpacing: Bool = false) {
+        scroller.configure(items.map {
+            var item = $0.scrollingItem; item.chineseSpacing = chineseSpacing; return item
+        })
+    }
     func configurePresentation(_ presentation: ComponentPresentation) {
         width = presentation.textWidth ?? .init()
         scroller.configurePresentation(presentation)
@@ -331,7 +355,7 @@ final class LyricsComponent {
         content.configure([TextComponentItem(
             id: UUID(uuidString: "FE191D66-BC0A-474B-9E8D-77803975F57C")!,
             text: display.text, style: configuration.resolvedStyle,
-            fillWidth: configuration.fillWidth)])
+            fillWidth: configuration.fillWidth)], chineseSpacing: true)
         scroller.scrubber.toolTip = display.detail
         interaction.toolTip = "\(display.detail)\nTap to search lyrics · Swipe right +5s · Swipe left −5s"
     }

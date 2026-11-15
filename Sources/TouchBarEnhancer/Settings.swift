@@ -211,6 +211,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private var showingEnhancedBar = false
     private weak var currentPane: NSView?
     private var paneSizes: [ObjectIdentifier: NSSize] = [:]
+    private var paneMinimumSizeConstraints: [NSLayoutConstraint] = []
     var onPreviewApp: ((LayoutApp?) -> Void)?
     var onCustomizeApp: ((LayoutApp) -> Void)?
     private let generalStatusLabel = NSTextField(wrappingLabelWithString: "")
@@ -362,9 +363,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         guard let content = window?.contentView else { return }
         if let currentPane { paneSizes[ObjectIdentifier(currentPane)] = content.bounds.size }
         content.subviews.forEach { $0.removeFromSuperview() }
-        // Remove the outgoing pane's minimum sizes before shrinking the window.
+        NSLayoutConstraint.deactivate(paneMinimumSizeConstraints)
+        paneMinimumSizeConstraints = []
+        // AppKit ignores contentMinSize for Auto Layout windows. Enforce the
+        // active pane's minimum in the same constraint system as its content.
         if let size {
             window?.contentMinSize = size
+            paneMinimumSizeConstraints = [
+                content.widthAnchor.constraint(greaterThanOrEqualToConstant: size.width),
+                content.heightAnchor.constraint(greaterThanOrEqualToConstant: size.height)
+            ]
+            NSLayoutConstraint.activate(paneMinimumSizeConstraints)
             let saved = paneSizes[ObjectIdentifier(pane)] ?? size
             resizeContent(to: NSSize(width: max(saved.width, size.width), height: max(saved.height, size.height)))
         }

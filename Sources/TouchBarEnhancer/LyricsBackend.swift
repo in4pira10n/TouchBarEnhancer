@@ -122,6 +122,7 @@ final class LyricsRepository {
     private struct CacheEntry: Codable {
         var track: LyricsTrack; var saved: Date; var result: LyricsSearchResult?
         var preferences: LyricsSearchPreferences?
+        var matchingVersion: Int? = nil
     }
     struct Candidate: Sendable, Equatable {
         var track: LyricsTrack
@@ -136,6 +137,7 @@ final class LyricsRepository {
     private var memory: [String: CacheEntry] = [:]
     private(set) var preferences: LyricsSearchPreferences
     private var revision = UUID()
+    private static let matchingVersion = 2
     var onSelectionChange: ((LyricsTrack) -> Void)?
 
     init(directory: URL? = nil, transport: Transport? = nil, preferences: LyricsSearchPreferences = .init()) {
@@ -163,38 +165,46 @@ final class LyricsRepository {
         if let selected = selection(for: track) { return selected }
         if !refresh, let entry = cached(track) { return entry.result }
         let configuration = preferences, token = revision
-        var discovered: [String: [Candidate]] = [:], failed = false
-        // Prefer a strict match from any source before considering fuzzy ones.
-        // Within each pass, the user's source priority is authoritative.
-        for fuzzy in configuration.fuzzyMatching ? [false, true] : [false] {
-            for source in configuration.orderedSources.map(\.rawValue) {
+        var discovered: [Candidate] = [], failed = false
+        func remember(_ result: LyricsSearchResult) throws -> LyricsSearchResult {
+            try Task.checkCancellation()
+            if let chosen = selection(for: track) { return chosen }
+            if revision == token { save(.init(track: track, saved: Date(), result: result, preferences: configuration, matchingVersion: Self.matchingVersion)) }
+            return result
+        }
+        // Exact title AND artist across sources always outrank fuzzy candidates.
+        // A title-only retry can also discover an exact match missed by a provider.
+        for source in configuration.orderedSources.map(\.rawValue) {
+            var seen = Set<String>()
+            for titleOnly in track.artist.isEmpty ? [true] : [false, true] {
                 try Task.checkCancellation()
                 do {
-                    let values: [Candidate]
-                    if let known = discovered[source] { values = known }
-                    else {
-                        var found = try await candidates(source, track: track, titleOnly: track.artist.isEmpty)
-                        if !track.artist.isEmpty && !found.contains(where: { Self.matchScore($0.track, for: track) != nil }) {
-                            let broad = try await candidates(source, track: track, titleOnly: true)
-                            var seen = Set(found.map(\.id))
-                            found += broad.filter { seen.insert($0.id).inserted }
-                        }
-                        discovered[source] = found; values = found
-                    }
-                    if let result = try await matchingLyrics(values, source: source, track: track, fuzzy: fuzzy) {
-                        try Task.checkCancellation()
-                        if let chosen = selection(for: track) { return chosen }
-                        if revision == token { save(.init(track: track, saved: Date(), result: result, preferences: configuration)) }
-                        return result
+                    let found = try await candidates(source, track: track, titleOnly: titleOnly)
+                        .filter { seen.insert($0.id).inserted }
+                        .map { var value = $0; value.source = source; return value }
+                    discovered += found
+                    if let result = try await matchingLyrics(found, source: source, track: track, fuzzy: false) {
+                        return try remember(result)
                     }
                 } catch is CancellationError { throw CancellationError() }
-                catch { try Task.checkCancellation(); failed = true; discovered[source] = [] }
+                catch { try Task.checkCancellation(); failed = true }
+            }
+        }
+        if configuration.fuzzyMatching {
+            // Rank across providers by duration before source order. A duration
+            // alone is never enough: related title and version checks still apply.
+            for candidate in Self.rankedCandidates(discovered, for: track, fuzzy: true).prefix(6) {
+                try Task.checkCancellation()
+                do {
+                    if let result = try await fetch(candidate, source: candidate.source) { return try remember(result) }
+                } catch is CancellationError { throw CancellationError() }
+                catch { try Task.checkCancellation(); failed = true }
             }
         }
         try Task.checkCancellation()
         if let chosen = selection(for: track) { return chosen }
         if failed { throw LyricsSearchError.unavailable }
-        if revision == token { save(.init(track: track, saved: Date(), result: nil, preferences: configuration)) }
+        if revision == token { save(.init(track: track, saved: Date(), result: nil, preferences: configuration, matchingVersion: Self.matchingVersion)) }
         return nil
     }
 
@@ -203,24 +213,31 @@ final class LyricsRepository {
         preferences = value; revision = UUID(); return true
     }
 
-    func searchCandidates(title: String, artist: String) async throws -> [Candidate] {
+    func searchCandidates(title: String, artist: String, duration: Double? = nil) async throws -> [Candidate] {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return [] }
-        let query = LyricsTrack(title: String(title.prefix(300)), artist: String(artist.prefix(300)))
+        let query = LyricsTrack(title: String(title.prefix(300)), artist: String(artist.prefix(300)), duration: duration)
         var results: [Candidate] = [], failures = 0
         for source in preferences.orderedSources.map(\.rawValue) {
             try Task.checkCancellation()
             do {
                 var found = try await candidates(source, track: query, titleOnly: artist.isEmpty)
-                if found.isEmpty && !artist.isEmpty { found = try await candidates(source, track: query, titleOnly: true) }
-                found.sort { (Self.matchScore($0.track, for: query, fuzzy: true) ?? 0) > (Self.matchScore($1.track, for: query, fuzzy: true) ?? 0) }
+                if !artist.isEmpty {
+                    do {
+                        let broad = try await candidates(source, track: query, titleOnly: true)
+                        var seen = Set(found.map(\.id)); found += broad.filter { seen.insert($0.id).inserted }
+                    } catch is CancellationError { throw CancellationError() }
+                    catch { try Task.checkCancellation() } // Retain usable narrow results.
+                }
                 results += found.prefix(30).map { var item = $0; item.source = source; return item }
             } catch is CancellationError { throw CancellationError() }
             catch { try Task.checkCancellation(); failures += 1 }
         }
         if results.isEmpty && failures > 0 { throw LyricsSearchError.unavailable }
-        return results
+        let ranked = Self.rankedCandidates(results, for: query, fuzzy: true)
+        let recommended = Set(ranked.map(\.identity))
+        return ranked + results.filter { !recommended.contains($0.identity) }
     }
 
     func lyrics(for candidate: Candidate) async throws -> LyricsSearchResult {
@@ -267,26 +284,54 @@ final class LyricsRepository {
                 [LyricsTrack.normalized(name), LyricsTrack.normalized(name.applyingTransform(.toLatin, reverse: false) ?? name)]
             }.filter { !$0.isEmpty })
         }
-        guard !title.isEmpty, !artist.isEmpty, !otherTitle.isEmpty, !otherArtist.isEmpty else { return nil }
-        let artistMatches = artist == otherArtist || !performers(track.artist).isDisjoint(with: performers(candidate.artist))
+        guard !title.isEmpty, !otherTitle.isEmpty, Self.versions(track.title) == Self.versions(candidate.title) else { return nil }
+        let artistMatches = !artist.isEmpty && !otherArtist.isEmpty
+            && (artist == otherArtist || !performers(track.artist).isDisjoint(with: performers(candidate.artist)))
         var score: Double
-        if title == otherTitle && artistMatches { score = artist == otherArtist ? 100 : 85 }
+        if title == otherTitle && !artist.isEmpty && artist == otherArtist { score = 100 }
         else {
-            guard fuzzy, Self.versions(track.title) == Self.versions(candidate.title) else { return nil }
-            if title == otherTitle { score = 55 }
+            guard fuzzy else { return nil }
+            // Missing artist is permitted only with a trustworthy duration.
+            guard !artist.isEmpty && !otherArtist.isEmpty || durationDifference(candidate, for: track) != nil else { return nil }
+            if title == otherTitle { score = artistMatches ? 85 : 55 }
             else {
                 let left = Self.baseTitle(track.title), right = Self.baseTitle(candidate.title)
                 guard left == right || Self.similar(left, right) else { return nil }
                 score = artistMatches ? 75 : 40
             }
         }
-        if let duration = track.duration, let other = candidate.duration, duration.isFinite, other.isFinite, duration > 0, other > 0 {
+        if let duration = validDuration(track.duration), let other = validDuration(candidate.duration) {
             let difference = abs(duration - other)
             guard difference <= max(8, duration * 0.04) else { return nil }
             score += max(0, 20 - difference)
         }
         if !track.album.isEmpty, LyricsTrack.normalized(track.album) == LyricsTrack.normalized(candidate.album) { score += 10 }
         return score
+    }
+
+    private static func validDuration(_ value: Double?) -> Double? {
+        value.flatMap { $0.isFinite && $0 > 0 && $0 <= 86_400 ? $0 : nil }
+    }
+    static func durationDifference(_ candidate: LyricsTrack, for track: LyricsTrack) -> Double? {
+        guard let duration = validDuration(track.duration), let other = validDuration(candidate.duration) else { return nil }
+        let difference = abs(duration - other)
+        return difference <= max(8, duration * 0.04) ? difference : nil
+    }
+    private static func rankedCandidates(_ values: [Candidate], for track: LyricsTrack, fuzzy: Bool) -> [Candidate] {
+        let ranked = values.enumerated().compactMap { index, candidate -> (candidate: Candidate, exact: Bool, duration: Double?, score: Double, order: Int)? in
+            guard let score = matchScore(candidate.track, for: track, fuzzy: fuzzy) else { return nil }
+            return (candidate, matchScore(candidate.track, for: track) != nil,
+                durationDifference(candidate.track, for: track), score, index)
+        }
+        return ranked.sorted { left, right in
+            if left.exact != right.exact { return left.exact }
+            if !left.exact {
+                if (left.duration != nil) != (right.duration != nil) { return left.duration != nil }
+                if let a = left.duration, let b = right.duration, a != b { return a < b }
+            }
+            if left.score != right.score { return left.score > right.score }
+            return left.order < right.order // Stable source and provider order breaks ties.
+        }.map(\.candidate)
     }
 
     private static func versions(_ title: String) -> Set<String> {
@@ -416,6 +461,7 @@ final class LyricsRepository {
         let entry = memory[key] ?? file.flatMap { load($0) }
         guard let entry, entry.track.cacheKey == key,
               entry.preferences == preferences,
+              entry.matchingVersion == Self.matchingVersion,
               Date().timeIntervalSince(entry.saved) >= 0,
               Date().timeIntervalSince(entry.saved) < (entry.result == nil ? 3600 : 30 * 86_400),
               entry.result.map({ Self.valid($0) }) ?? true else { return nil }

@@ -27,7 +27,7 @@ struct LyricsBarSmoke {
             elapsed: 0, date: Date(), rate: 0, playing: false, source: "fixture")
         var event: (@MainActor (Bool?) -> Void)?
         var searches = 0, reads = 0, cancelled = 0
-        let result = LyricsSearchResult(lyrics: TimedLyrics(lrc: "[00:00]A short line\n[00:05]A longer lyric line · 更长的一句歌词\n[00:10]"), source: "Fixture")
+        let result = LyricsSearchResult(lyrics: TimedLyrics(lrc: "[00:00]A short line\n[00:05]这句歌词与Swift2026一起显示\n[00:10]"), source: "Fixture")
         let controller = LyricsController(search: { _ in searches += 1; return result },
             read: { reads += 1; $0(state) }, observe: { event = $0; return { event = nil; cancelled += 1 } })
         controller.onChange = { provider.configureLyricsDisplay($0) }
@@ -63,9 +63,11 @@ struct LyricsBarSmoke {
                 alignment: .center, truncation: .tail)))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            check("A longer lyric line · 更长的一句歌词")
+            check("这句歌词与Swift2026一起显示")
             let attributes = label(region).attributedStringValue.attributes(at: 0, effectiveRange: nil)
             precondition((attributes[.font] as! NSFont).pointSize == 18 && attributes[.kern] as? Double == 2)
+            precondition(label(region).attributedStringValue.attribute(.kern, at: 4, effectiveRange: nil) as? Double == 6.5,
+                "Native lyric measurement and drawing must include the quarter-em Pangu boundary")
             precondition(abs(region.frame.width - autoWidth) < 1 && searches == 1)
             provider.configureComponentPresentations(["lyrics": .init(alignment: .center, textWidth: .init(mode: .hug)), "keyboard": .init(layout: .fill)])
             state.elapsed = 0; event?(nil)
@@ -77,7 +79,7 @@ struct LyricsBarSmoke {
             state.elapsed = 5; event?(nil)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-            check("A longer lyric line · 更长的一句歌词")
+            check("这句歌词与Swift2026一起显示")
             precondition(region.frame.width > shortWidth && searches == 1)
             precondition(region.requestedWidth != nil)
             provider.configureComponentPresentations(["lyrics": .init(layout: .fill, textWidth: .init(mode: .fixed, fixed: 100)), "keyboard": .init(layout: .fill)])
@@ -85,7 +87,7 @@ struct LyricsBarSmoke {
                 style: .init(fontSize: 18, color: "orange", tracking: 2, alignment: .center, truncation: .tail)))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-            check("A longer lyric line · 更长的一句歌词")
+            check("这句歌词与Swift2026一起显示")
             precondition(abs(region.frame.width - 100) < 1)
             state.elapsed = 10; event?(nil)
         }

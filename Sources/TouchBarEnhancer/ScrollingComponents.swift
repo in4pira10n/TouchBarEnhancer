@@ -116,6 +116,7 @@ struct ScrollingComponentItem: Equatable {
     var toolTip: String
     var displayModeOverride: ComponentDisplayMode?
     var textStyle: TextComponentStyle?
+    var chineseSpacing = false
     var fillWidth: ComponentItemWidth?
 
     enum Background: Equatable {
@@ -280,7 +281,7 @@ final class ScrollingComponentItemView: NSScrubberItemView {
     private static func configureLabel(_ label: NSTextField, for item: ScrollingComponentItem) {
         if let style = item.textStyle {
             label.font = style.font
-            label.attributedStringValue = style.attributedString(item.title)
+            label.attributedStringValue = style.attributedString(item.title, chineseSpacing: item.chineseSpacing)
             label.alignment = style.textAlignment
             label.lineBreakMode = style.lineBreakMode
             label.maximumNumberOfLines = 1

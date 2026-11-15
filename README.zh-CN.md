@@ -4,7 +4,7 @@
 
 原生 macOS 菜单栏应用，用可复用组件为不同 App 定义 Touch Bar。使用 Swift 与 AppKit 开发，无需 BetterTouchTool，也无需安装完整 Xcode。
 
-**项目状态：** 开发初期，当前版本为 0.2.0。最低支持 macOS 14，实体使用需要配备 Touch Bar 的 MacBook Pro。应用界面使用英文。
+**项目状态：** 开发初期，当前版本为 0.3.0。最低支持 macOS 14，实体使用需要配备 Touch Bar 的 MacBook Pro。应用界面使用英文。
 
 ## 功能
 
@@ -16,13 +16,13 @@
 - 支持勾选模式、排除模式、单个 App 强制覆盖及全局暂停，默认静默启动。
 - 保留系统 Control Strip，以首个组件替代模态栏最左侧的关闭位置。
 - 在 Control Strip 设置页自定义独立按钮的 SF Symbol、点按／长按／修饰键动作，以及蓝牙／系统媒体播放自动化；使用私有注册接口，位置由 macOS 管理。
-- 可通过 Control Strip 交互展开独立的 **Enhanced Bar（增强栏）**，复用 App Bar 组件；**Lyrics（歌词）** 默认居中，显示从网易云、QQ 音乐或 LRCLIB 搜索的当前句，并在本地缓存。
+- 可通过 Control Strip 交互展开独立的 **Enhanced Bar（增强栏）**，复用 App Bar 组件；**Lyrics（歌词）** 默认居中，显示从网易云、QQ 音乐或 LRCLIB 搜索的当前句，支持本地缓存、原生 Pangu 式中英混排和每 App 排版设置。匹配优先考虑歌名与歌手完全一致，再按相符的时长优先模糊匹配。搜索页自动填充当前歌曲并预览推荐结果，确认后保存个人选择。
 
 ## 构建与运行
 
 ### 下载
 
-从 [GitHub Releases](https://github.com/in4pira10n/TouchBarEnhancer/releases/latest) 下载 Apple Silicon（`arm64`）ZIP，解压后将 `TouchBarEnhancer.app` 放在固定位置，再授予辅助功能权限。当前安装包要求 macOS 14+，采用本机签名，**尚未公证**，Gatekeeper 可能阻止打开。安装前请阅读发布说明。本次不包含 Intel 安装包。
+从 [GitHub Releases](https://github.com/in4pira10n/TouchBarEnhancer/releases/latest) 下载 Universal（`arm64` + `x86_64`）ZIP，解压后将 `TouchBarEnhancer.app` 放在固定位置，再授予辅助功能权限。同一个 App 支持运行 macOS 14+ 的 Apple Silicon 和 Intel Mac。安装包采用本机签名，**尚未公证**，Gatekeeper 可能阻止打开。安装前请阅读发布说明。
 
 ### 环境要求
 
@@ -57,6 +57,8 @@ open -g dist/TouchBarEnhancer.app
 也可将证书名称或指纹写在项目根目录 `.signing-identity.local` 的第一行。Git 已忽略此文件；请勿提交证书或私钥。
 
 签名身份缺失或不可用时构建会失败，不会退回临时签名。更新时保持相同的证书、bundle ID 和安装路径，有助于保留辅助功能授权。重新打包前先退出当前 App，之后仍运行同一个 `dist/TouchBarEnhancer.app`。
+
+构建同时支持 Apple Silicon 和 Intel 的 Universal App 时，使用 `bash scripts/build-app.sh --universal`。脚本通过 SwiftPM 分别编译两个架构，再用 `lipo` 合并并签名。不加此选项时，仅编译本机架构以便日常开发。
 
 ## 配置 Touch Bar
 
